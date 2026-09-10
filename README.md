@@ -87,7 +87,7 @@ Sheet layout (for reference / manual edits):
 | `food`    | `ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g, veg_share, confidence, source, message_id, corrected, photo_file_id` |
 | `sport`   | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source`                                                                             |
 | `reports` | `ts, week_start, chat_id, text`                                                                                                                     |
-| `water`   | `user_id, chat_id, name, tz, days, start, end, every_min, active, updated_at`                                                                        |
+| `water`   | `user_id, chat_id, name, tz, days, start, end, every_min, active, updated_at`                                                                       |
 
 ### 5. Gemini API key
 
@@ -204,7 +204,27 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 
 5. Set the VM timezone (`sudo timedatectl set-timezone Europe/Kyiv`, both images) or rely on `DEFAULT_TZ=Europe/Kyiv` in `.env`; the scheduler uses per-user `tz` from the `users` tab with `DEFAULT_TZ` as fallback.
 
-Updating: `git pull && docker compose up -d --build`.
+6. Update the bot after the code changes (same on both images):
+
+   ```bash
+   ssh oracle                                   # or: ssh -i ~/.ssh/oracle.key <user>@<PUBLIC_IP>
+   cd track_weight_bot
+   git pull                                     # fetch the new code
+   git diff HEAD@{1} -- .env.example            # new variables since the last pull? add them to .env
+   docker compose up -d --build                 # rebuild the image and swap the container
+   docker compose logs -f                       # expect "sheet ready" and "starting as @..."
+   ```
+
+   `up -d --build` rebuilds the image from the pulled code and recreates the container only if the image changed; the bot is offline for the few seconds between the old container stopping and the new one polling. `.env` and `secrets/` are untracked, so `git pull` never touches them. Missing sheet tabs or trailing columns are created automatically at startup, so no manual spreadsheet migration is needed.
+
+   If the release added or renamed commands, refresh the menu in @BotFather with `/setcommands` (block in step 1). Follow-ups:
+
+   ```bash
+   docker compose ps                            # State should be "running"
+   docker image prune -f                        # drop the previous image layers to free disk
+   ```
+
+   If the new container keeps restarting, `docker compose logs --tail 100` shows the traceback. To roll back, pick the previous commit from `git log --oneline`, then `git checkout <commit> && docker compose up -d --build`; `git checkout master` returns to the latest code.
 
 ---
 
