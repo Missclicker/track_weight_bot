@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "track-weight-bot"
+version = "0.1.0"
+description = "Telegram bot for a small group: food-photo calories, weight log, sport, weekly AI report. Google Sheets as storage, Gemini as AI."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Oleksii Maksymov" }]
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram==3.31.0",
+    "google-genai==2.22.0",
+    "gspread==6.2.1",
+    "google-auth==2.57.1",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+    "APScheduler==3.11.3",
+    "tzdata==2026.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/omaksymov/track_weight_bot"
+
+[tool.setuptools.packages.find]
+include = ["bot", "bot.*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # Cyrillic strings look like "confusable" characters
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF012"]

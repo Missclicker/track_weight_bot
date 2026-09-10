@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    image: track-weight-bot:local
+    container_name: track_weight_bot
+    env_file: .env
+    environment:
+      # Container clock; the bot itself schedules in DEFAULT_TZ / per-user tz.
+      TZ: ${TZ:-Europe/Kyiv}
+      # Inside the container the key is always at this path (see volume below).
+      GOOGLE_SERVICE_ACCOUNT_FILE: /app/secrets/service_account.json
+    volumes:
+      - ./secrets:/app/secrets:ro
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
