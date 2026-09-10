@@ -1,4 +1,4 @@
-"""Slash commands: /start /help /w /food /sport /today /week."""
+"""Slash commands: /start /help /w /food /sport /today /kcal /target /week."""
 
 from __future__ import annotations
 
@@ -12,10 +12,17 @@ from bot import i18n
 from bot.ai import GeminiClient
 from bot.config import Settings
 from bot.handlers import ensure_user
+from bot.handlers.photos import record_food
 from bot.handlers.sport import record_sport
 from bot.handlers.weight import record_weight
-from bot.parsing import parse_weight
-from bot.reports import today_summary
+from bot.parsing import (
+    KCAL_TARGET_MAX,
+    KCAL_TARGET_MIN,
+    is_target_clear_request,
+    parse_kcal_target,
+    parse_weight,
+)
+from bot.reports import day_food, today_summary
 from bot.scheduler import Jobs, user_now
 from bot.sheets import SheetsRepo
 
@@ -57,20 +64,7 @@ async def cmd_food(
     if not est.is_food:
         await message.reply(i18n.FOOD_NOT_FOOD)
         return
-    reply = await message.reply(
-        i18n.food_estimate(
-            est.dish,
-            est.kcal,
-            est.alcohol_kcal,
-            est.protein_g,
-            est.fat_g,
-            est.carbs_g,
-            est.veg_share,
-            est.confidence,
-            est.notes,
-        )
-    )
-    await repo.add_food(user, est, user_now(user, settings), "text", reply.message_id)
+    await record_food(message, user, est, repo, settings, "text")
 
 
 async def cmd_sport(
@@ -101,6 +95,38 @@ async def cmd_today(message: Message, repo: SheetsRepo, settings: Settings) -> N
     )
 
 
+async def cmd_kcal(message: Message, repo: SheetsRepo, settings: Settings) -> None:
+    user = await ensure_user(message, repo, settings)
+    today = user_now(user, settings).date()
+    food = await day_food(repo, user.user_id, today)
+    await message.reply(
+        i18n.kcal_today(user.name, today.isoformat(), food.items, user.daily_kcal_target)
+    )
+
+
+async def cmd_target(
+    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings
+) -> None:
+    user = await ensure_user(message, repo, settings)
+    if not command.args:
+        if user.daily_kcal_target:
+            text = i18n.TARGET_CURRENT.format(kcal=f"{user.daily_kcal_target:.0f}")
+        else:
+            text = i18n.TARGET_NONE
+        await message.reply(text)
+        return
+    if is_target_clear_request(command.args):
+        await repo.set_daily_kcal_target(user.user_id, user.chat_id, None)
+        await message.reply(i18n.TARGET_CLEARED)
+        return
+    target = parse_kcal_target(command.args)
+    if target is None:
+        await message.reply(i18n.TARGET_USAGE.format(lo=KCAL_TARGET_MIN, hi=KCAL_TARGET_MAX))
+        return
+    await repo.set_daily_kcal_target(user.user_id, user.chat_id, target)
+    await message.reply(i18n.TARGET_SET.format(kcal=f"{target:.0f}"))
+
+
 async def cmd_week(message: Message, jobs: Jobs) -> None:
     await jobs.run_weekly_report(message.chat.id)
 
@@ -117,5 +143,7 @@ def build() -> Router:
     router.message.register(cmd_food, Command(*aliases["food"]))
     router.message.register(cmd_sport, Command(*aliases["sport"]))
     router.message.register(cmd_today, Command(*aliases["today"]))
+    router.message.register(cmd_kcal, Command(*aliases["kcal"]))
+    router.message.register(cmd_target, Command(*aliases["target"]))
     router.message.register(cmd_week, Command(*aliases["week"]))
     return router

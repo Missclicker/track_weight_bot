@@ -7,7 +7,7 @@ and that the allowed-chat gate works. Gemini and Sheets are replaced by fakes.
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -25,6 +25,7 @@ from bot import i18n
 from bot.ai import FoodEstimate, SportEntry
 from bot.config import Settings
 from bot.handlers import build_router
+from bot.scheduler import user_now
 from bot.sheets import User
 from tests.conftest import FakeRepo
 
@@ -88,6 +89,12 @@ class FakeAI:
     def __init__(self) -> None:
         self.sport_calls: list[str] = []
         self.revise_calls: list[tuple[bool, str, str]] = []
+        self.food_estimates: list[FoodEstimate] = []  # answers for estimate_food, in order
+
+    async def estimate_food(
+        self, image_bytes: bytes | None, mime: str | None, caption: str | None
+    ) -> FoodEstimate:
+        return self.food_estimates.pop(0)
 
     async def revise_food(
         self, image: bytes | None, mime: str | None, previous: dict[str, Any], correction: str
@@ -409,3 +416,114 @@ async def test_handler_error_is_reported_not_raised(harness, repo: FakeRepo) -> 
     ai.parse_sport = boom  # type: ignore[method-assign]
     await dp.feed_update(bot, _update("біг 30 хв"))
     assert session.sent[-1]["text"] == i18n.ERROR_TRY_AGAIN
+
+
+async def test_food_command_reports_running_day_total(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, session, ai = harness
+    ai.food_estimates = [
+        FoodEstimate(dish="омлет", kcal=500),
+        FoodEstimate(dish="курячі гомілки", kcal=630),
+    ]
+    await dp.feed_update(bot, _update("/food омлет"))
+    first = session.sent[-1]["text"]
+    assert first.startswith(i18n.FOOD_PREFIX + " 500")
+    assert i18n.day_total(500, None) in first
+
+    await dp.feed_update(bot, _update("/їжа гомілки", message_id=2))
+    second = session.sent[-1]["text"]
+    assert i18n.day_total(1130, None) in second
+    assert second.index(i18n.day_total(1130, None)) < second.index("Щоб виправити")
+    assert [r["kcal"] for r in repo.rows["food"]] == [500, 630]
+    assert "Разом за сьогодні: 1130 ккал." in second
+
+
+async def test_kcal_command_lists_today(harness, repo: FakeRepo, settings: Settings) -> None:
+    dp, bot, session, _ = harness
+    await dp.feed_update(bot, _update("/kcal"))
+    assert i18n.KCAL_NO_DATA in session.sent[-1]["text"]
+
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій", daily_kcal_target=2000)
+    await repo.upsert_user(me)
+    now = user_now(me, settings)
+    await repo.add_food(me, FoodEstimate(dish="омлет <b>", kcal=500), now, "text", 10)
+    await repo.add_food(me, FoodEstimate(dish="борщ", kcal=630), now, "photo", 11)
+    await repo.add_food(me, FoodEstimate(dish="вчора", kcal=9000), now - timedelta(days=1), "x", 12)
+    await dp.feed_update(bot, _update("/калорії", message_id=2))
+    text = session.sent[-1]["text"]
+    assert not text.startswith(i18n.FOOD_PREFIX)  # a reply to it must not count as a correction
+    assert "- 500 ккал - омлет &lt;b&gt;" in text
+    assert "- 630 ккал - борщ" in text
+    assert "9000" not in text
+    assert text.endswith("Разом: 1130 ккал (ціль 2000).")
+
+
+async def test_corrections_report_the_day_total(harness, repo: FakeRepo, settings: Settings):
+    dp, bot, session, _ = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій", daily_kcal_target=2000)
+    await repo.upsert_user(me)
+    now = user_now(me, settings)
+    await repo.add_food(me, FoodEstimate(dish="омлет", kcal=500), now, "text", 10)
+    await repo.add_food(me, FoodEstimate(dish="борщ", kcal=600), now, "text", 11)
+    borsch = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 11)
+
+    # a number: the row is updated first, then the total is read back
+    await dp.feed_update(bot, _update("450", reply_to=borsch))
+    assert session.sent[-1]["text"] == "Виправив: 450 ккал. " + i18n.day_total(950, 2000)
+
+    # text: FakeAI re-estimates to 720, replacing the 450
+    await dp.feed_update(bot, _update("з хлібом", reply_to=borsch, message_id=2))
+    assert i18n.day_total(1220, 2000) in session.sent[-1]["text"]
+    assert repo.rows["food"][1]["kcal"] == 720
+
+    # an entry from another day is totalled for that day, not for today
+    old = now - timedelta(days=3)
+    await repo.add_food(me, FoodEstimate(dish="піца", kcal=1000), old, "text", 12)
+    pizza = _bot_message(i18n.FOOD_PREFIX + " 1000 ккал - піца", 12)
+    await dp.feed_update(bot, _update("800", reply_to=pizza, message_id=3))
+    assert i18n.day_total(800, 2000, old.date().isoformat()) in session.sent[-1]["text"]
+
+
+async def test_target_command_sets_shows_and_clears(harness, repo: FakeRepo, settings) -> None:
+    dp, bot, session, ai = harness
+    await dp.feed_update(bot, _update("/ціль"))
+    assert session.sent[-1]["text"] == i18n.TARGET_NONE  # auto-registered, no target yet
+
+    await dp.feed_update(bot, _update("/target 2 000 ккал", message_id=2))
+    assert session.sent[-1]["text"] == i18n.TARGET_SET.format(kcal="2000")
+    me = await repo.get_user(ME, CHAT_ID)
+    assert me is not None and me.daily_kcal_target == 2000
+
+    await dp.feed_update(bot, _update("/tsil", message_id=3))
+    assert session.sent[-1]["text"] == i18n.TARGET_CURRENT.format(kcal="2000")
+
+    # the target now shows up next to the totals ...
+    ai.food_estimates = [FoodEstimate(dish="омлет", kcal=500)]
+    await dp.feed_update(bot, _update("/food омлет", message_id=4))
+    assert "Разом за сьогодні: 500 ккал (ціль 2000)." in session.sent[-1]["text"]
+    await dp.feed_update(bot, _update("/kcal", message_id=5))
+    assert session.sent[-1]["text"].endswith("Разом: 500 ккал (ціль 2000).")
+    await dp.feed_update(bot, _update("/today", message_id=6))
+    assert "(ціль 2000)" in session.sent[-1]["text"]
+
+    await dp.feed_update(bot, _update("/ціль 100", message_id=7))
+    assert session.sent[-1]["text"].startswith("Денна ціль по калоріях")
+    assert (await repo.get_user(ME, CHAT_ID)).daily_kcal_target == 2000  # unchanged
+
+    # ... and disappears completely once cleared: no "(ціль ...)" anywhere
+    await dp.feed_update(bot, _update("/ціль стоп", message_id=8))
+    assert session.sent[-1]["text"] == i18n.TARGET_CLEARED
+    assert (await repo.get_user(ME, CHAT_ID)).daily_kcal_target is None
+    await dp.feed_update(bot, _update("/kcal", message_id=9))
+    assert "ціль" not in session.sent[-1]["text"]
+    await dp.feed_update(bot, _update("/today", message_id=10))
+    assert "ціль" not in session.sent[-1]["text"]
+
+
+def test_target_suffix_hides_missing_or_broken_targets() -> None:
+    assert i18n.kcal_today("A", "2026-09-10", [("x", 100)], None).endswith("Разом: 100 ккал.")
+    assert i18n.kcal_today("A", "2026-09-10", [("x", 100)], 0).endswith("Разом: 100 ккал.")
+    assert "nan" not in i18n.kcal_today("A", "2026-09-10", [("x", 100)], float("nan"))
+    assert "ціль" not in i18n.today_summary("A", "d", 100, 0, 0, 0, None, 1, float("nan"))
+    assert "(ціль 1800)" in i18n.day_total(100, 1800)

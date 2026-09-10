@@ -3,6 +3,7 @@ user- or model-supplied text passed in here must already be HTML-escaped by the 
 
 from __future__ import annotations
 
+import math
 from html import escape
 
 from bot.parsing import WATER_ALL_DAYS, WATER_WEEKDAYS, WATER_WEEKEND, WaterSchedule
@@ -22,6 +23,8 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "food": ("food", "yizha", "їжа"),
     "sport": ("sport", "спорт"),
     "today": ("today", "sohodni", "сьогодні"),
+    "kcal": ("kcal", "kalorii", "калорії"),
+    "target": ("target", "tsil", "ціль"),
     "week": ("week", "tyzhden", "тиждень", "звіт"),
     "water": ("water", "voda", "вода"),
 }
@@ -38,6 +41,8 @@ HELP = (
     "/food борщ і два хліба або /їжа ... - записати їжу текстом\n"
     "/sport біг 5 км 30 хв або /спорт ... - записати активність\n"
     "/today або /сьогодні - мій підсумок за сьогодні\n"
+    "/kcal або /калорії - що я з'їв сьогодні і скільки це ккал\n"
+    "/target 2000 або /ціль 2000 - денна ціль ккал (необов'язково; /ціль стоп - прибрати)\n"
     "/week або /тиждень - тижневий звіт зараз\n"
     "/water будні з 9 до 18 кожні 30 хв або /вода ... - нагадування пити воду в особисті\n"
     "/help або /довідка - ця довідка\n\n"
@@ -59,6 +64,8 @@ WEIGHT_SAME = "Записав {kg} кг. Без змін від попередн
 FOOD_USAGE = "Опиши, що з'їв: /food борщ і два шматки хліба"
 FOOD_NOT_FOOD = "Не бачу тут їжі. Якщо це все ж їжа - підпиши фото."
 CORRECTION_SAVED = "Виправив: {kcal} ккал."
+DAY_TOTAL_TODAY = "Разом за сьогодні: {kcal} ккал{target}."
+DAY_TOTAL_DATE = "Разом за {date}: {kcal} ккал{target}."
 CORRECTION_NOT_FOUND = "Не знайшов запис для виправлення."
 CORRECTION_NOT_UNDERSTOOD = (
     "Не зрозумів уточнення. Напиши, що змінити: вагу порції, склад або назву страви."
@@ -129,6 +136,18 @@ WEEKLY_AI_FAILED = "(Рекомендації від AI недоступні, п
 TODAY_HEADER = "Твій день, {name} ({date}):"
 TODAY_NO_DATA = "Сьогодні записів ще немає."
 
+KCAL_HEADER = "Їжа за сьогодні, {name} ({date}):"
+KCAL_NO_DATA = "Сьогодні їжі ще не записано."
+
+TARGET_USAGE = (
+    "Денна ціль по калоріях: /ціль 2000 (від {lo} до {hi} ккал). "
+    "Її можна не задавати - тоді я просто рахую. Прибрати: /ціль стоп."
+)
+TARGET_SET = "Записав ціль: {kcal} ккал на день. Показуватиму її поруч із підсумком."
+TARGET_CLEARED = "Прибрав денну ціль. Далі просто рахую калорії."
+TARGET_CURRENT = "Твоя денна ціль: {kcal} ккал. Змінити: /ціль 1800. Прибрати: /ціль стоп."
+TARGET_NONE = "Денної цілі немає. Задати: /ціль 2000."
+
 _CONFIDENCE = ((0.75, "висока"), (0.45, "середня"), (0.0, "низька"))
 
 
@@ -148,6 +167,21 @@ def fmt_delta(value: float) -> str:
     return f"{sign}{abs(value):.1f}"
 
 
+def _target_suffix(daily_target: float | None) -> str:
+    """Suffix " (ціль 2000)" - or nothing when no (sane) target is set."""
+    if daily_target is None or not math.isfinite(daily_target) or daily_target <= 0:
+        return ""
+    return f" (ціль {daily_target:.0f})"
+
+
+def day_total(kcal: float, daily_target: float | None, date_str: str | None = None) -> str:
+    """Line "Разом за сьогодні: 1130 ккал (ціль 2000)." - or "за <date>" for a past day."""
+    target = _target_suffix(daily_target)
+    if date_str is None:
+        return DAY_TOTAL_TODAY.format(kcal=f"{kcal:.0f}", target=target)
+    return DAY_TOTAL_DATE.format(date=date_str, kcal=f"{kcal:.0f}", target=target)
+
+
 def food_estimate(
     dish: str,
     kcal: float,
@@ -159,8 +193,13 @@ def food_estimate(
     confidence: float,
     notes: str,
     corrected: bool = False,
+    day_total_line: str | None = None,
 ) -> str:
-    """Bot reply to a food photo, `/food` text or a correction. Must start with FOOD_PREFIX."""
+    """Bot reply to a food photo, `/food` text or a correction. Must start with FOOD_PREFIX.
+
+    `day_total_line` is the `day_total(...)` text for the day this entry belongs to, including
+    the entry itself.
+    """
     lines = [
         f"{FOOD_PREFIX} {kcal:.0f} ккал - {escape(dish)}",
         f"Білки {protein_g:.0f} г, жири {fat_g:.0f} г, вуглеводи {carbs_g:.0f} г, "
@@ -173,6 +212,8 @@ def food_estimate(
         lines.append(escape(notes))
     if corrected:
         lines.append(CORRECTED_MARK)
+    if day_total_line:
+        lines.append(day_total_line)
     lines.append(
         "Щоб виправити - відповідай на це повідомлення числом ккал або уточненням "
         "(вага порції, склад, назва страви)."
@@ -215,10 +256,23 @@ def today_summary(
     if sport_minutes:
         lines.append(f"Спорт: {sport_minutes:.0f} хв, -{sport_kcal:.0f} ккал")
     net = kcal_in - sport_kcal
-    target = f" (ціль {daily_target:.0f})" if daily_target else ""
-    lines.append(f"Разом: {net:.0f} ккал{target}")
+    lines.append(f"Разом: {net:.0f} ккал{_target_suffix(daily_target)}")
     if weight is not None:
         lines.append(f"Вага: {fmt_kg(weight)} кг")
+    return "\n".join(lines)
+
+
+def kcal_today(
+    name: str, date_str: str, items: list[tuple[str, float]], daily_target: float | None
+) -> str:
+    """`/kcal`: today's food entries one per line and the total. Never starts with FOOD_PREFIX."""
+    lines = [KCAL_HEADER.format(name=escape(name), date=date_str)]
+    if not items:
+        lines.append(KCAL_NO_DATA)
+        return "\n".join(lines)
+    lines.extend(f"- {kcal:.0f} ккал - {escape(dish)}" for dish, kcal in items)
+    total = sum(kcal for _, kcal in items)
+    lines.append(f"Разом: {total:.0f} ккал{_target_suffix(daily_target)}.")
     return "\n".join(lines)
 
 

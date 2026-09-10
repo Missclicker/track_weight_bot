@@ -24,7 +24,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators. |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
-| `bot/reports.py` | Aggregations: `today_summary` and `build_weekly_payload` (the JSON given to Gemini). |
+| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies), `today_summary` and `build_weekly_payload` (the JSON given to Gemini). |
 | `bot/scheduler.py` | `Jobs` (ping per timezone, water tick, weekly report) and `build_scheduler`. |
 | `bot/handlers/` | aiogram routers, one file per feature; `__init__.py` assembles them and holds the allowed-chat gate and the global error handler. |
 
@@ -37,7 +37,12 @@ private chat whose id is listed - e.g. the owner testing in a DM - is served lik
 told the bot can now DM them, anybody else gets "works only in the group") and `/вода`.
 Inside `guarded` the routers are tried in order:
 
-1. `commands` - `/start /help /w /food /sport /today /week`.
+1. `commands` - `/start /help /w /food /sport /today /kcal /target /week`. `/target` writes
+   only the `daily_kcal_target` cell (`set_daily_kcal_target`), so other hand-edited columns
+   are untouched; the target is optional and `i18n._target_suffix` hides it when it is
+   missing, zero or not a finite number. `/food` and food photos
+   share `photos.record_food`, which reads the sender's food rows for today so the `≈` reply
+   ends with "Разом за сьогодні: N ккал" (the new entry included); `/kcal` lists those rows.
 2. `water` - `/вода` (`/water`, `/voda`): show, set or cancel the sender's water reminders.
 3. `corrections` - a reply to a bot message that starts with `≈` (the food-estimate prefix).
    A number -> `update_food_kcal(user_id, message_id)`. Any other text -> `get_food_entry`,
@@ -45,7 +50,8 @@ Inside `guarded` the routers are tried in order:
    earlier estimate + the user's text -> new `≈` reply -> `update_food_entry`, which also re-keys
    the row to the new reply's `message_id` so corrections can be chained. Both are scoped to the
    sender, so only the author of an entry can correct it and equal `message_id`s from different
-   groups never collide.
+   groups never collide. Both replies end with the corrected total for the day the entry
+   belongs to ("за сьогодні" or "за <date>"), read back from the sheet after the update.
 4. `weight` - a bare number in `[WEIGHT_MIN, WEIGHT_MAX]` that is not a reply, or a number in
    reply to the morning ping (recognised by the ping text, so it survives restarts) -> `add_weight`.
 5. `photos` - any photo -> Gemini vision -> reply -> `add_food` with the *reply's* `message_id`

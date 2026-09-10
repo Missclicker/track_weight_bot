@@ -1,4 +1,4 @@
-"""Aggregations over the sheet for `/today` and the weekly report.
+"""Aggregations over the sheet for `/today`, `/kcal`, the food-reply totals and the weekly report.
 
 Both functions only need the repository interface (`user_rows_between`, `get_active_users`), so
 they are tested against the in-memory `FakeRepo` in `tests/conftest.py`.
@@ -35,6 +35,22 @@ class TodaySummary:
     @property
     def net_kcal(self) -> float:
         return self.kcal_in - self.sport_kcal
+
+
+@dataclass
+class DayFood:
+    """Food entries of one user for one calendar day, in the order they were logged."""
+
+    items: list[tuple[str, float]]  # (dish, kcal)
+
+    @property
+    def total_kcal(self) -> float:
+        return sum(kcal for _, kcal in self.items)
+
+
+async def day_food(repo: Repo, user_id: int, day: date) -> DayFood:
+    rows = await repo.user_rows_between("food", user_id, day, day)
+    return DayFood([(str(r.get("dish", "")), num(r.get("kcal"))) for r in rows])
 
 
 async def today_summary(repo: Repo, user: User, today: date) -> TodaySummary:

@@ -42,6 +42,10 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    sport - Записати активність: /sport біг 5 км 30 хв
    today - Мій підсумок за сьогодні
    sohodni - Те саме, що /today
+   kcal - Що я з'їв сьогодні і скільки це ккал
+   kalorii - Те саме, що /kcal
+   target - Денна ціль ккал (необов'язково): /target 2000, прибрати: /target стоп
+   tsil - Те саме, що /target
    week - Тижневий звіт зараз
    tyzhden - Те саме, що /week
    water - Нагадування пити воду: /water будні з 9 до 18 кожні 30 хв
@@ -50,7 +54,7 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    dovidka - Те саме, що /help
    ```
 
-   Every command also has a Cyrillic spelling the bot understands when typed — `/вага`, `/їжа`, `/спорт`, `/сьогодні`, `/тиждень`, `/вода`, `/довідка`, `/старт` — but Telegram only allows `a-z 0-9 _` in registered commands, so those cannot go into `/setcommands` and won't autocomplete. The full alias table is `COMMANDS` in `bot/i18n.py`.
+   Every command also has a Cyrillic spelling the bot understands when typed — `/вага`, `/їжа`, `/спорт`, `/сьогодні`, `/калорії`, `/ціль`, `/тиждень`, `/вода`, `/довідка`, `/старт` — but Telegram only allows `a-z 0-9 _` in registered commands, so those cannot go into `/setcommands` and won't autocomplete. The full alias table is `COMMANDS` in `bot/i18n.py`.
 
 ### 2. Telegram group + privacy mode
 
@@ -250,17 +254,17 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 
 | message                                                                                                            | action                                                      |
 | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| photo (optionally with caption)                                                                                    | Gemini vision → kcal estimate → `food`                      |
+| photo (optionally with caption)                                                                                    | Gemini vision → kcal estimate (+ today's running total) → `food` |
 | bare number in `[WEIGHT_MIN, WEIGHT_MAX]`, e.g. `84.3` / `84,3`                                                    | weight → `weight`                                           |
 | reply to the bot's morning ping with a number                                                                      | weight                                                      |
 | reply to the bot's food estimate with a number                                                                     | sets kcal of that estimate                                  |
 | reply to the bot's food estimate with text (weight, ingredients, dish name)                                        | Gemini re-estimates it (with the photo) and updates the row |
-| `/w`, `/food`, `/sport`, `/today`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                           |
+| `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                     |
 | `/water …` / `/вода …` (in the group or in the DM)                                                                 | water reminder schedule → `water`                           |
 | text mentioning sport keywords (біг, зал, велосипед, плавання, …) or `/sport`                                      | Gemini text parse → `sport`                                 |
 | anything else                                                                                                      | ignored                                                     |
 
-You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target` and `active` there can be edited by hand and are preserved.
+You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target` and `active` there can be edited by hand and are preserved; `daily_kcal_target` is also set from the chat with `/target 2000` (`/ціль 2000`) and cleared with `/target стоп`. It is optional: without it the bot just counts, with it every food reply, `/kcal` and `/today` show `(ціль N)`.
 
 ## Water reminders
 

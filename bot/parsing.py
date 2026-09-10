@@ -69,6 +69,42 @@ def parse_correction(text: str | None) -> float | None:
     return value
 
 
+KCAL_TARGET_MIN, KCAL_TARGET_MAX = 500, 10_000
+# "/ціль стоп" and friends clear the daily target
+TARGET_CLEAR_WORDS = frozenset(
+    {
+        "0",
+        "стоп",
+        "скинути",
+        "скинь",
+        "прибрати",
+        "прибери",
+        "немає",
+        "без",
+        "off",
+        "reset",
+        "clear",
+    }
+)
+
+
+def parse_kcal_target(text: str | None) -> float | None:
+    """Parse "/ціль 2000" / "2 000 ккал" into a daily kcal target; None if it is not a sane one."""
+    if not text:
+        return None
+    match = _CORRECTION.match(text)
+    if not match:
+        return None
+    value = _to_float(match.group("num"))
+    if not KCAL_TARGET_MIN <= value <= KCAL_TARGET_MAX:
+        return None
+    return value
+
+
+def is_target_clear_request(text: str | None) -> bool:
+    return bool(text) and text.strip().lower().rstrip(".!") in TARGET_CLEAR_WORDS
+
+
 def looks_like_sport(text: str | None) -> bool:
     """True when a free-text message mentions a sport keyword from the MET table.
 

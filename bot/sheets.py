@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -162,9 +163,10 @@ def num_or_none(value: Any) -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(str(value).replace(",", "."))
+        parsed = float(str(value).replace(",", "."))
     except ValueError:
         return None
+    return parsed if math.isfinite(parsed) else None  # "nan" / "inf" typed into a cell
 
 
 def num(value: Any) -> float:
@@ -428,6 +430,22 @@ class SheetsRepo:
     async def upsert_user(self, user: User) -> None:
         await self._run(self._upsert_user_sync, user)
 
+    def _set_daily_kcal_target_sync(self, user_id: int, chat_id: int, target: float | None) -> bool:
+        ws = self._ws("users")
+        rows = with_retry(ws.get_all_values)
+        col = HEADERS["users"].index("daily_kcal_target") + 1
+        for idx, existing in enumerate(rows[1:], start=2):
+            if len(existing) >= 2 and existing[0] == str(user_id) and existing[1] == str(chat_id):
+                cell = gspread.utils.rowcol_to_a1(idx, col)
+                with_retry(ws.batch_update, [{"range": cell, "values": [[_blank(target)]]}])
+                self._users_cache = None
+                return True
+        return False
+
+    async def set_daily_kcal_target(self, user_id: int, chat_id: int, target: float | None) -> bool:
+        """Write (or clear, with None) the user's daily kcal target; False if they are unknown."""
+        return await self._run(self._set_daily_kcal_target_sync, user_id, chat_id, target)
+
     # -- water reminders --------------------------------------------------------------------
 
     def _all_water_sync(self) -> list[WaterSubscription]:
@@ -623,6 +641,7 @@ class SheetsRepo:
         )
         entry: dict[str, Any] = {k: num(row.get(k)) for k in numeric}
         entry["dish"] = row.get("dish", "")
+        entry["date"] = row.get("date", "")
         entry["source"] = row.get("source", "")
         entry["photo_file_id"] = row.get("photo_file_id", "")
         return entry

@@ -28,6 +28,13 @@ class FakeRepo:
     async def upsert_user(self, user: User) -> None:
         self.users = [u for u in self.users if u.user_id != user.user_id] + [user]
 
+    async def set_daily_kcal_target(self, user_id: int, chat_id: int, target: float | None) -> bool:
+        user = await self.get_user(user_id, chat_id)
+        if user is None:
+            return False
+        user.daily_kcal_target = target
+        return True
+
     async def get_active_users(self, chat_id: int) -> list[User]:
         return [u for u in self.users if u.chat_id == chat_id and u.active]
 

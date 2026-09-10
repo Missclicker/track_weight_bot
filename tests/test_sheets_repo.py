@@ -238,3 +238,31 @@ async def test_get_and_update_food_entry(repo: SheetsRepo):
     row = ws(repo, "food").rows[1]
     assert row[HEADERS["food"].index("corrected")] == "TRUE"
     assert row[HEADERS["food"].index("photo_file_id")] == "AgACfile"  # kept for later corrections
+
+
+async def test_set_daily_kcal_target_writes_only_that_cell(repo: SheetsRepo) -> None:
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="Олексій", tz="Europe/Kyiv"))
+    ws = repo._worksheets["users"]  # type: ignore[attr-defined]
+    ws.rows[1][HEADERS["users"].index("height_cm")] = "180"  # hand-edited column
+
+    assert await repo.set_daily_kcal_target(1, -100, 2000) is True
+    user = await repo.get_user(1, -100)
+    assert user is not None and user.daily_kcal_target == 2000
+    assert user.height_cm == 180  # untouched
+    assert user.tz == "Europe/Kyiv"
+
+    assert await repo.set_daily_kcal_target(1, -100, None) is True
+    user = await repo.get_user(1, -100)
+    assert user is not None and user.daily_kcal_target is None
+    assert ws.rows[1][HEADERS["users"].index("daily_kcal_target")] == ""
+
+    assert await repo.set_daily_kcal_target(2, -100, 2000) is False  # unknown user
+
+
+def test_num_or_none_rejects_nan_and_inf() -> None:
+    from bot.sheets import num_or_none
+
+    assert num_or_none("nan") is None
+    assert num_or_none("inf") is None
+    assert num_or_none("2000") == 2000
+    assert num_or_none("") is None

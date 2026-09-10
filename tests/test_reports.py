@@ -5,7 +5,7 @@ import pytest
 
 from bot import i18n
 from bot.ai import FoodEstimate
-from bot.reports import build_weekly_payload, today_summary
+from bot.reports import build_weekly_payload, day_food, today_summary
 from bot.sheets import User
 from tests.conftest import FakeRepo
 
@@ -135,3 +135,14 @@ def test_weekly_stats_block_formats_delta() -> None:
     assert "Олексій <b>" in block  # sent with parse_mode=None, so not HTML-escaped
     assert "-0.8" in block
     assert "85 -> 84.2" in block
+
+
+async def test_day_food_keeps_order_and_totals(repo: FakeRepo, user: User) -> None:
+    today = date(2026, 9, 8)
+    await repo.add_food(user, _food(400), _dt(today, 13), "text", 2)
+    await repo.add_food(user, _food(600), _dt(today, 9), "photo", 1)
+    await repo.add_food(user, _food(9000), _dt(date(2026, 9, 7)), "photo", 3)
+    food = await day_food(repo, user.user_id, today)
+    assert food.items == [("тест", 600), ("тест", 400)]
+    assert food.total_kcal == 1000
+    assert (await day_food(repo, user.user_id, date(2026, 9, 9))).total_kcal == 0

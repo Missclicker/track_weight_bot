@@ -4,9 +4,11 @@ import pytest
 
 from bot.parsing import (
     WaterSchedule,
+    is_target_clear_request,
     is_water_due,
     looks_like_sport,
     parse_correction,
+    parse_kcal_target,
     parse_water_schedule,
     parse_weight,
 )
@@ -256,3 +258,26 @@ WORKDAY = parse_water_schedule("будні з 9 до 18 кожні 30 хвили
 )
 def test_is_water_due(schedule: WaterSchedule, now: datetime, expected: bool) -> None:
     assert is_water_due(schedule, now) is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("2000", 2000), ("1 800 ккал", 1800), ("2500 kcal", 2500), ("500", 500), ("10000", 10000)],
+)
+def test_parse_kcal_target_accepts(text: str, expected: float) -> None:
+    assert parse_kcal_target(text) == expected
+
+
+@pytest.mark.parametrize("text", [None, "", "0", "499", "10001", "2000 грам", "abc", "84.3"])
+def test_parse_kcal_target_rejects(text: str | None) -> None:
+    assert parse_kcal_target(text) is None
+
+
+@pytest.mark.parametrize("text", ["стоп", "Стоп.", "0", "скинути", "off", "немає"])
+def test_target_clear_words(text: str) -> None:
+    assert is_target_clear_request(text)
+
+
+@pytest.mark.parametrize("text", [None, "", "2000", "стоп пити", "стопкран"])
+def test_target_clear_words_reject(text: str | None) -> None:
+    assert not is_target_clear_request(text)
