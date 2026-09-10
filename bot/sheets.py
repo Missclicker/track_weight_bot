@@ -13,6 +13,7 @@ Tab layout (headers must match the README):
             veg_share, confidence, source, message_id, corrected, photo_file_id
     sport   ts, date, user_id, name, activity, minutes, distance_km, kcal, source
     reports ts, week_start, chat_id, text
+    water   user_id, chat_id, name, tz, days, start, end, every_min, active, updated_at
 """
 
 from __future__ import annotations
@@ -32,7 +33,8 @@ from gspread.exceptions import APIError, WorksheetNotFound
 from gspread.utils import ValueRenderOption
 
 from bot.ai import FoodEstimate
-from bot.config import Settings
+from bot.config import WEEKDAYS, Settings, parse_hhmm
+from bot.parsing import WATER_MAX_INTERVAL_MIN, WATER_MIN_INTERVAL_MIN, WaterSchedule
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +43,7 @@ SCOPES = (
     "https://www.googleapis.com/auth/drive",
 )
 
-Tab = Literal["users", "weight", "food", "sport", "reports"]
+Tab = Literal["users", "weight", "food", "sport", "reports", "water"]
 
 HEADERS: dict[str, list[str]] = {
     "users": [
@@ -87,6 +89,18 @@ HEADERS: dict[str, list[str]] = {
         "source",
     ],
     "reports": ["ts", "week_start", "chat_id", "text"],
+    "water": [
+        "user_id",
+        "chat_id",
+        "name",
+        "tz",
+        "days",
+        "start",
+        "end",
+        "every_min",
+        "active",
+        "updated_at",
+    ],
 }
 
 USERS_CACHE_TTL_S = 60.0
@@ -155,6 +169,79 @@ def num_or_none(value: Any) -> float | None:
 
 def num(value: Any) -> float:
     return num_or_none(value) or 0.0
+
+
+def days_to_cell(days: frozenset[int]) -> str:
+    """`{0, 2, 4}` -> `"mon,wed,fri"` (the `water.days` cell)."""
+    return ",".join(WEEKDAYS[d] for d in sorted(days))
+
+
+def days_from_cell(value: str) -> frozenset[int]:
+    """Inverse of `days_to_cell`; unknown names are dropped."""
+    names = [p.strip().lower()[:3] for p in value.split(",")]
+    return frozenset(WEEKDAYS.index(n) for n in names if n in WEEKDAYS)
+
+
+@dataclass
+class WaterSubscription:
+    """One person's water-reminder schedule; one row of the `water` tab.
+
+    `tz` is a copy of the user's zone at subscribe time, so the per-minute scheduler tick never
+    has to join with the `users` tab. There is one row per `user_id` (a person has a single
+    schedule); `chat_id` only records where they subscribed.
+    """
+
+    user_id: int
+    chat_id: int
+    name: str
+    tz: str
+    schedule: WaterSchedule
+    active: bool = True
+    updated_at: str = ""
+
+    def to_row(self) -> list[Any]:
+        return [
+            self.user_id,
+            self.chat_id,
+            self.name,
+            self.tz,
+            days_to_cell(self.schedule.days),
+            self.schedule.start.strftime("%H:%M"),
+            self.schedule.end.strftime("%H:%M"),
+            self.schedule.every_min,
+            "TRUE" if self.active else "FALSE",
+            self.updated_at,
+        ]
+
+    @classmethod
+    def from_record(cls, rec: dict[str, Any]) -> WaterSubscription | None:
+        """Build a subscription from a sheet row, or None when the row is not usable.
+
+        The tab is meant to be editable by hand, so a broken row must be skipped rather than
+        take the whole tick down.
+        """
+        try:
+            days = days_from_cell(str(rec.get("days", "")))
+            start = parse_hhmm(str(rec.get("start", "")))
+            end = parse_hhmm(str(rec.get("end", "")))
+            every_min = int(num(rec.get("every_min")))
+            user_id = int(num(rec["user_id"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        # the same limits the command enforces: a hand-typed `1` must not turn into a DM a minute
+        if not days or start >= end or not user_id:
+            return None
+        if not WATER_MIN_INTERVAL_MIN <= every_min <= WATER_MAX_INTERVAL_MIN:
+            return None
+        return cls(
+            user_id=user_id,
+            chat_id=int(num(rec.get("chat_id"))),
+            name=str(rec.get("name", "")),
+            tz=str(rec.get("tz", "") or ""),
+            schedule=WaterSchedule(days=days, start=start, end=end, every_min=every_min),
+            active=str(rec.get("active", "TRUE")).strip().upper() in ("TRUE", "1", "YES"),
+            updated_at=str(rec.get("updated_at", "") or ""),
+        )
 
 
 def _status_code(exc: APIError) -> int | None:
@@ -340,6 +427,59 @@ class SheetsRepo:
 
     async def upsert_user(self, user: User) -> None:
         await self._run(self._upsert_user_sync, user)
+
+    # -- water reminders --------------------------------------------------------------------
+
+    def _all_water_sync(self) -> list[WaterSubscription]:
+        # Dedupe by user_id, last row wins - same protection as `_all_users_sync`.
+        by_user: dict[int, WaterSubscription] = {}
+        for rec in self._records("water"):
+            if not rec.get("user_id"):
+                continue
+            sub = WaterSubscription.from_record(rec)
+            if sub is None:
+                log.warning("skipping unusable water row for user %r", rec.get("user_id"))
+                continue
+            by_user[sub.user_id] = sub
+        return list(by_user.values())
+
+    async def get_water_subscriptions(self) -> list[WaterSubscription]:
+        """Every stored subscription, deduped by user; callers filter on `.active`."""
+        return await self._run(self._all_water_sync)
+
+    def _upsert_water_sync(self, sub: WaterSubscription) -> None:
+        ws = self._ws("water")
+        rows = with_retry(ws.get_all_values)
+        for idx, existing in enumerate(rows[1:], start=2):
+            if existing and existing[0] == str(sub.user_id):
+                with_retry(ws.update, [sub.to_row()], f"A{idx}")
+                return
+        with_retry(ws.append_row, sub.to_row(), value_input_option="RAW")
+
+    async def upsert_water_subscription(self, sub: WaterSubscription) -> None:
+        """Replace the sender's row, or append one if they never subscribed."""
+        await self._run(self._upsert_water_sync, sub)
+
+    def _deactivate_water_sync(self, user_id: int) -> bool:
+        ws = self._ws("water")
+        rows = with_retry(ws.get_all_values)
+        col = HEADERS["water"].index("active")
+        for idx, existing in enumerate(rows[1:], start=2):
+            if (
+                len(existing) > col
+                and existing[0] == str(user_id)
+                and existing[col].strip().upper() in ("TRUE", "1", "YES")
+            ):
+                with_retry(
+                    ws.batch_update,
+                    [{"range": gspread.utils.rowcol_to_a1(idx, col + 1), "values": [["FALSE"]]}],
+                )
+                return True
+        return False
+
+    async def deactivate_water_subscription(self, user_id: int) -> bool:
+        """Flip `active` to FALSE; False when there was no active row to switch off."""
+        return await self._run(self._deactivate_water_sync, user_id)
 
     # -- appends ----------------------------------------------------------------------------
 

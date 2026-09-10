@@ -14,7 +14,8 @@ from gspread.exceptions import APIError
 
 from bot.ai import FoodEstimate
 from bot.config import Settings
-from bot.sheets import HEADERS, SheetsRepo, User, explain_startup_error
+from bot.parsing import parse_water_schedule
+from bot.sheets import HEADERS, SheetsRepo, User, WaterSubscription, explain_startup_error
 
 
 class FakeWorksheet:
@@ -108,6 +109,63 @@ async def test_last_weight_orders_by_datetime_not_string(repo: SheetsRepo):
     await repo.add_weight(user, 84.0, later, "text")
     got = await repo.last_weight(1, datetime(2026, 10, 26, tzinfo=kyiv))
     assert got is not None and got[1] == 84.0
+
+
+def _water(user_id: int, text: str, chat_id: int = -100) -> WaterSubscription:
+    schedule = parse_water_schedule(text)
+    assert schedule is not None
+    return WaterSubscription(
+        user_id=user_id,
+        chat_id=chat_id,
+        name=f"user{user_id}",
+        tz="Europe/Kyiv",
+        schedule=schedule,
+        updated_at="2026-09-10T09:00:00+03:00",
+    )
+
+
+async def test_upsert_water_subscription_keeps_one_row_per_user(repo: SheetsRepo):
+    await repo.upsert_water_subscription(_water(1, "будні з 9 до 18 кожні 30 хвилин"))
+    await repo.upsert_water_subscription(_water(2, "вихідні кожні 2 години"))
+    await repo.upsert_water_subscription(_water(1, "щодня з 8 до 20 кожну годину"))
+
+    rows = ws(repo, "water").rows
+    assert len(rows) == 3  # header + one row per user, the first one rewritten in place
+    assert rows[1][HEADERS["water"].index("days")] == "mon,tue,wed,thu,fri,sat,sun"
+    assert rows[1][HEADERS["water"].index("start")] == "08:00"
+    assert rows[1][HEADERS["water"].index("every_min")] == "60"
+
+    subs = {s.user_id: s for s in await repo.get_water_subscriptions()}
+    assert subs[1].schedule.every_min == 60
+    assert subs[2].schedule.days == frozenset({5, 6})
+    assert subs[1].tz == "Europe/Kyiv" and subs[1].active
+
+
+async def test_deactivate_water_subscription_flips_the_cell(repo: SheetsRepo):
+    await repo.upsert_water_subscription(_water(1, "кожні 30 хв"))
+    col = HEADERS["water"].index("active")
+
+    assert await repo.deactivate_water_subscription(1) is True
+    assert ws(repo, "water").rows[1][col] == "FALSE"
+    assert await repo.deactivate_water_subscription(1) is False  # already off
+    assert await repo.deactivate_water_subscription(99) is False
+    stored = await repo.get_water_subscriptions()
+    assert len(stored) == 1 and stored[0].active is False
+
+
+async def test_get_water_subscriptions_skips_a_broken_row(repo: SheetsRepo):
+    await repo.upsert_water_subscription(_water(1, "кожні 30 хв"))
+    # somebody edited the tab by hand: no days left, and a nonsense time
+    ws(repo, "water").rows.append(["2", "-100", "B", "Europe/Kyiv", "", "9", "", "30", "TRUE", ""])
+    ws(repo, "water").rows.append(["3", "-100", "C", "", "mon", "25:00", "26:00", "30", "TRUE", ""])
+    # ... or an interval the command would never accept (this would be a DM every minute)
+    ws(repo, "water").rows.append(["4", "-100", "D", "", "mon", "09:00", "18:00", "1", "TRUE", ""])
+    ws(repo, "water").rows.append(
+        ["5", "-100", "E", "", "mon", "09:00", "18:00", "1440", "TRUE", ""]
+    )
+
+    stored = await repo.get_water_subscriptions()
+    assert [s.user_id for s in stored] == [1]
 
 
 class _Resp:

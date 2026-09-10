@@ -1,8 +1,20 @@
+from datetime import datetime, time
+
 import pytest
 
-from bot.parsing import looks_like_sport, parse_correction, parse_weight
+from bot.parsing import (
+    WaterSchedule,
+    is_water_due,
+    looks_like_sport,
+    parse_correction,
+    parse_water_schedule,
+    parse_weight,
+)
 
 LO, HI = 40, 200
+WEEKDAYS = frozenset({0, 1, 2, 3, 4})
+WEEKEND = frozenset({5, 6})
+ALL_DAYS = frozenset(range(7))
 
 
 @pytest.mark.parametrize(
@@ -154,3 +166,93 @@ def test_looks_like_sport_positive(text: str) -> None:
 )
 def test_looks_like_sport_negative(text: str | None) -> None:
     assert not looks_like_sport(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "days", "start", "end", "every"),
+    [
+        ("будні дні з 9 до 18 кожні 30 хвилин", WEEKDAYS, time(9), time(18), 30),
+        ("weekdays from 9 to 18 every 30 min", WEEKDAYS, time(9), time(18), 30),
+        ("по буднях 9-18 кожні 45 хв", WEEKDAYS, time(9), time(18), 45),
+        ("робочі дні з 09:00 до 18:00 кожні 90 мін", WEEKDAYS, time(9), time(18), 90),
+        ("щодня з 8:30 до 22:00 кожну годину", ALL_DAYS, time(8, 30), time(22), 60),
+        ("кожного дня кожні 30 хвилин", ALL_DAYS, time(9), time(21), 30),
+        ("daily every 15 minutes", ALL_DAYS, time(9), time(21), 15),
+        ("вихідні кожні 2 години", WEEKEND, time(9), time(21), 120),
+        ("weekends 10:00-20:00 every 2 hours", WEEKEND, time(10), time(20), 120),
+        ("пн, ср, пт з 10 до 19 кожні 2 год", frozenset({0, 2, 4}), time(10), time(19), 120),
+        ("mon,wed,fri 10-19 every 2 hours", frozenset({0, 2, 4}), time(10), time(19), 120),
+        ("нд кожні 3 години", frozenset({6}), time(9), time(21), 180),
+        # ranges and full day names
+        ("пн-пт з 9 до 18 кожні 30 хв", WEEKDAYS, time(9), time(18), 30),
+        ("mon - fri from 9 to 18 every 30 min", WEEKDAYS, time(9), time(18), 30),
+        ("пт-пн кожні 2 години", frozenset({4, 5, 6, 0}), time(9), time(21), 120),
+        ("вівторок, четвер з 9 до 17 кожну годину", frozenset({1, 3}), time(9), time(17), 60),
+        ("у п'ятницю та суботу кожні 2 години", frozenset({4, 5}), time(9), time(21), 120),
+        ("субота неділя кожні 2 години", WEEKEND, time(9), time(21), 120),
+        ("tuesday and thursday every 45 minutes", frozenset({1, 3}), time(9), time(21), 45),
+        # bare units
+        ("every 30m", ALL_DAYS, time(9), time(21), 30),
+        ("every 2h", ALL_DAYS, time(9), time(21), 120),
+        # the interval alone is enough: days and window fall back to the defaults
+        ("кожні 30 хв", ALL_DAYS, time(9), time(21), 30),
+        ("раз на годину", ALL_DAYS, time(9), time(21), 60),
+        ("every hour", ALL_DAYS, time(9), time(21), 60),
+        # order does not matter, and the limits are inclusive
+        ("кожні 30 хв будні", WEEKDAYS, time(9), time(21), 30),
+        ("кожні 12 годин щодня", ALL_DAYS, time(9), time(21), 720),
+        ("9:15-18:45 кожні 15 хвилин", ALL_DAYS, time(9, 15), time(18, 45), 15),
+    ],
+)
+def test_parse_water_schedule_accepts(
+    text: str, days: frozenset[int], start: time, end: time, every: int
+) -> None:
+    assert parse_water_schedule(text) == WaterSchedule(
+        days=days, start=start, end=end, every_min=every
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,
+        "",
+        "   ",
+        "будні з 9 до 18",  # no interval
+        "щодня",
+        "кожні 5 хвилин",  # below the 15-minute floor
+        "кожні 13 годин",  # above the 12-hour ceiling
+        "з 18 до 9 кожні 30 хв",  # inverted window
+        "з 9 до 9 кожні 30 хв",  # empty window
+        "кожні 30 хв з 25 до 26",  # impossible hours
+        "абракадабра",
+    ],
+)
+def test_parse_water_schedule_rejects(text: str | None) -> None:
+    assert parse_water_schedule(text) is None
+
+
+WORKDAY = parse_water_schedule("будні з 9 до 18 кожні 30 хвилин")
+
+
+@pytest.mark.parametrize(
+    ("schedule", "now", "expected"),
+    [
+        (WORKDAY, datetime(2026, 1, 5, 9, 0), True),  # Monday, first slot
+        (WORKDAY, datetime(2026, 1, 5, 9, 30), True),
+        (WORKDAY, datetime(2026, 1, 5, 18, 0), True),  # `end` is inclusive
+        (WORKDAY, datetime(2026, 1, 10, 9, 0), False),  # Saturday
+        (WORKDAY, datetime(2026, 1, 5, 8, 30), False),  # before the window
+        (WORKDAY, datetime(2026, 1, 5, 18, 30), False),  # after the window
+        (WORKDAY, datetime(2026, 1, 5, 9, 20), False),  # not on the grid
+        (parse_water_schedule("кожні 45 хв"), datetime(2026, 1, 5, 9, 0), True),
+        (parse_water_schedule("кожні 45 хв"), datetime(2026, 1, 5, 9, 45), True),
+        (parse_water_schedule("кожні 45 хв"), datetime(2026, 1, 5, 10, 30), True),
+        (parse_water_schedule("кожні 45 хв"), datetime(2026, 1, 5, 10, 0), False),
+        (parse_water_schedule("вихідні кожні 2 години"), datetime(2026, 1, 10, 11, 0), True),
+        (parse_water_schedule("вихідні кожні 2 години"), datetime(2026, 1, 10, 12, 0), False),
+        (parse_water_schedule("вихідні кожні 2 години"), datetime(2026, 1, 9, 11, 0), False),
+    ],
+)
+def test_is_water_due(schedule: WaterSchedule, now: datetime, expected: bool) -> None:
+    assert is_water_due(schedule, now) is expected

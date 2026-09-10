@@ -9,7 +9,7 @@ import pytest
 
 from bot.ai import FoodEstimate
 from bot.config import Settings
-from bot.sheets import HEADERS, User
+from bot.sheets import HEADERS, User, WaterSubscription
 
 
 class FakeRepo:
@@ -33,6 +33,29 @@ class FakeRepo:
 
     async def get_user(self, user_id: int, chat_id: int) -> User | None:
         return next((u for u in self.users if u.user_id == user_id and u.chat_id == chat_id), None)
+
+    async def get_water_subscriptions(self) -> list[WaterSubscription]:
+        by_user: dict[int, WaterSubscription] = {}
+        for row in self.rows["water"]:
+            sub = WaterSubscription.from_record(row)
+            if sub is not None:
+                by_user[sub.user_id] = sub
+        return list(by_user.values())
+
+    async def upsert_water_subscription(self, sub: WaterSubscription) -> None:
+        row = dict(zip(HEADERS["water"], sub.to_row(), strict=True))
+        for idx, existing in enumerate(self.rows["water"]):
+            if existing["user_id"] == sub.user_id:
+                self.rows["water"][idx] = row
+                return
+        self.rows["water"].append(row)
+
+    async def deactivate_water_subscription(self, user_id: int) -> bool:
+        for row in self.rows["water"]:
+            if row["user_id"] == user_id and row["active"] == "TRUE":
+                row["active"] = "FALSE"
+                return True
+        return False
 
     async def add_weight(self, user: User, kg: float, when: datetime, source: str) -> None:
         self._append(

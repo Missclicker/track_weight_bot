@@ -12,7 +12,7 @@ from datetime import datetime
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
-from aiogram.filters import BaseFilter, CommandStart
+from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.types import ErrorEvent, Message
 
 from bot import i18n
@@ -75,23 +75,44 @@ async def ensure_user(message: Message, repo: SheetsRepo, settings: Settings) ->
     return user
 
 
+async def find_member(user_id: int, repo: SheetsRepo, settings: Settings) -> User | None:
+    """The sender's row from the first allowed chat they belong to, or None.
+
+    Used by handlers that can be reached from a private chat: a DM must never register anybody
+    (its `chat.id` is the user, not a group), so someone unknown is told to use the group.
+    """
+    for chat_id in sorted(settings.allowed_chat_ids):
+        user = await repo.get_user(user_id, chat_id)
+        if user is not None:
+            return user
+    return None
+
+
 def build_router() -> Router:
-    """Root router: allowed-chat handlers first, then the /start reply for other private chats."""
-    from bot.handlers import commands, corrections, photos, sport, weight
+    """Root router: allowed-chat handlers first, then the private-chat handlers."""
+    from bot.handlers import commands, corrections, photos, sport, water, weight
 
     root = Router(name="root")
 
     # `guarded` goes first so a private chat that *is* in ALLOWED_CHAT_IDS (e.g. the owner testing
-    # in a DM) gets the real handlers. Only /start from other private chats reaches `private`,
-    # which explains the bot is for a group; every other message from them is dropped.
+    # in a DM) gets the real handlers. From other private chats only /start and /вода reach
+    # `private`; every other message from them is dropped.
     private = Router(name="private")
     private.message.register(private_start, F.chat.type == ChatType.PRIVATE, CommandStart())
+    private.message.register(
+        water.cmd_water, F.chat.type == ChatType.PRIVATE, Command(*i18n.COMMANDS["water"])
+    )
 
     guarded = Router(name="guarded")
     guarded.message.filter(AllowedChat())
     # order matters: explicit commands, then replies (corrections before weight), then the rest
     guarded.include_routers(
-        commands.build(), corrections.build(), weight.build(), photos.build(), sport.build()
+        commands.build(),
+        water.build(),
+        corrections.build(),
+        weight.build(),
+        photos.build(),
+        sport.build(),
     )
 
     root.include_routers(guarded, private)
@@ -99,7 +120,11 @@ def build_router() -> Router:
     return root
 
 
-async def private_start(message: Message) -> None:
+async def private_start(message: Message, repo: SheetsRepo, settings: Settings) -> None:
+    """/start in a private chat: a member learns the bot can now DM them, a stranger is refused."""
+    if message.from_user is not None and await find_member(message.from_user.id, repo, settings):
+        await message.answer(i18n.WATER_DM_READY)
+        return
     await message.answer(i18n.PRIVATE_CHAT_ONLY_GROUP)
 
 

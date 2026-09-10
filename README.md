@@ -7,6 +7,7 @@ A small Telegram bot for a friend group that wants to lose weight together. It l
 3. **Pings everyone who hasn't weighed in by 11:00.**
 4. **Logs sport** from free text ("пробіг 5 км за 30 хв") as negative calories.
 5. **Posts a weekly AI report** — intake, sport, weight trend, and recommendations (kcal target, veg/protein ratio).
+6. **Reminds you to drink water** in a private message, on a schedule you pick yourself (`/вода будні з 9 до 18 кожні 30 хвилин`).
 
 Everything runs on free tiers: a Python bot with long polling (no public endpoint needed), Google Sheets as the database, Gemini Flash for AI. Estimated cost: **$0/month**. Bot replies are in Ukrainian by default (see `bot/i18n.py`).
 
@@ -43,11 +44,13 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    sohodni - Те саме, що /today
    week - Тижневий звіт зараз
    tyzhden - Те саме, що /week
+   water - Нагадування пити воду: /water будні з 9 до 18 кожні 30 хв
+   voda - Те саме, що /water
    help - Довідка
    dovidka - Те саме, що /help
    ```
 
-   Every command also has a Cyrillic spelling the bot understands when typed — `/вага`, `/їжа`, `/спорт`, `/сьогодні`, `/тиждень`, `/довідка`, `/старт` — but Telegram only allows `a-z 0-9 _` in registered commands, so those cannot go into `/setcommands` and won't autocomplete. The full alias table is `COMMANDS` in `bot/i18n.py`.
+   Every command also has a Cyrillic spelling the bot understands when typed — `/вага`, `/їжа`, `/спорт`, `/сьогодні`, `/тиждень`, `/вода`, `/довідка`, `/старт` — but Telegram only allows `a-z 0-9 _` in registered commands, so those cannot go into `/setcommands` and won't autocomplete. The full alias table is `COMMANDS` in `bot/i18n.py`.
 
 ### 2. Telegram group + privacy mode
 
@@ -73,7 +76,7 @@ By default a bot in a group only sees commands, @mentions and replies to itself.
 1. Create a new Google Spreadsheet (any name, e.g. `Weight tracker`).
 2. **Share** it with the service-account e-mail from step 3.5 as **Editor** (untick "notify").
 3. Copy the id from the URL: `https://docs.google.com/spreadsheets/d/<THIS_PART>/edit` → `GOOGLE_SHEET_ID`.
-4. You do **not** need to create sheets/tabs manually. On first start the bot runs `python -m bot.init_sheets` logic and creates the tabs `users`, `weight`, `food`, `sport`, `reports` with headers. Running `python -m bot.init_sheets` again is safe (idempotent).
+4. You do **not** need to create sheets/tabs manually. On first start the bot runs `python -m bot.init_sheets` logic and creates the tabs `users`, `weight`, `food`, `sport`, `reports`, `water` with headers. Running `python -m bot.init_sheets` again is safe (idempotent).
 
 Sheet layout (for reference / manual edits):
 
@@ -84,6 +87,7 @@ Sheet layout (for reference / manual edits):
 | `food`    | `ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g, veg_share, confidence, source, message_id, corrected, photo_file_id` |
 | `sport`   | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source`                                                                             |
 | `reports` | `ts, week_start, chat_id, text`                                                                                                                     |
+| `water`   | `user_id, chat_id, name, tz, days, start, end, every_min, active, updated_at`                                                                        |
 
 ### 5. Gemini API key
 
@@ -232,10 +236,19 @@ Updating: `git pull && docker compose up -d --build`.
 | reply to the bot's food estimate with a number                                                                     | sets kcal of that estimate                                  |
 | reply to the bot's food estimate with text (weight, ingredients, dish name)                                        | Gemini re-estimates it (with the photo) and updates the row |
 | `/w`, `/food`, `/sport`, `/today`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                           |
+| `/water …` / `/вода …` (in the group or in the DM)                                                                 | water reminder schedule → `water`                           |
 | text mentioning sport keywords (біг, зал, велосипед, плавання, …) or `/sport`                                      | Gemini text parse → `sport`                                 |
 | anything else                                                                                                      | ignored                                                     |
 
 You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target` and `active` there can be edited by hand and are preserved.
+
+## Water reminders
+
+`/вода будні дні з 9 до 18 кожні 30 хвилин` (also `/water`, `/voda`) subscribes the sender to "drink some water" pings. Days (`будні`, `вихідні`, `щодня`, a list like `пн, ср, пт` or a range like `пн-пт`), the window (`з 9 до 18`, `9:00-18:00`) and the interval are understood in Ukrainian and English in any order; only the interval is required and it must be between 15 minutes and 12 hours. Days default to every day and the window to 09:00–21:00. `/вода` alone shows the current schedule, `/вода стоп` switches it off.
+
+The pings are **private messages**, and Telegram only lets a bot write to someone who has started a chat with it. So the bot sends the confirmation to the private chat first and stores the subscription only if that worked; otherwise it answers with a `https://t.me/<yourbot>?start=water` link — open it, press **Start**, repeat the command. Pressing Start there is also how a member gets the "I can write to you now" reply instead of the "works only in the group" one.
+
+Reminders are evaluated once a minute, per subscriber, in the timezone stored in their `water` row (copied from `users.tz` when they subscribed — changing `users.tz` later does not move the reminders; re-run the command instead), from an in-memory copy of the `water` tab. The copy is refreshed at startup, nightly at 00:05 and on every `/вода`, so the tab can also be edited by hand (keep `every_min` within 15–720 and `start`/`end` as plain `HH:MM` text, or the row is skipped). If a subscriber blocks the bot or deletes the chat, the next attempt sets their `active` cell to `FALSE`.
 
 ## Project layout
 

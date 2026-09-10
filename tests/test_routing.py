@@ -15,6 +15,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.methods import TelegramMethod
 from aiogram.methods.base import TelegramType
 from aiogram.types import Chat, Message, Update
@@ -33,11 +34,17 @@ ME = 7
 
 
 class MockSession(BaseSession):
-    """Records outgoing API calls and answers `sendMessage` with a synthetic message."""
+    """Records outgoing API calls and answers `sendMessage` with a synthetic message.
+
+    Chats listed in `forbidden_chats` fail the way Telegram fails a DM to somebody who never
+    pressed Start.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.sent: list[dict[str, Any]] = []
+        self.forbidden_chats: set[int] = set()
+        self.missing_chats: set[int] = set()  # "chat not found": the DM was deleted
         self._next_id = 1000
 
     async def close(self) -> None:
@@ -48,6 +55,13 @@ class MockSession(BaseSession):
     ) -> TelegramType:
         data = method.model_dump(exclude_none=True)
         if method.__api_method__ == "sendMessage":
+            if data["chat_id"] in self.forbidden_chats:
+                raise TelegramForbiddenError(
+                    method=method,
+                    message="Forbidden: bot can't initiate conversation with a user",
+                )
+            if data["chat_id"] in self.missing_chats:
+                raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
             self.sent.append(data)
             self._next_id += 1
             return Message(  # type: ignore[return-value]
@@ -86,13 +100,27 @@ class FakeAI:
         return SportEntry(activity="running", title="біг", minutes=30, distance_km=5, kcal=390)
 
 
+class FakeJobs:
+    """Stands in for `scheduler.Jobs`; counts the water reloads handlers ask for."""
+
+    def __init__(self) -> None:
+        self.reloads = 0
+
+    async def reload_water_subscriptions(self) -> None:
+        self.reloads += 1
+
+
+def jobs_of(dp: Dispatcher) -> FakeJobs:
+    return dp.workflow_data["jobs"]
+
+
 @pytest.fixture
 def harness(settings: Settings, repo: FakeRepo) -> tuple[Dispatcher, Bot, MockSession, FakeAI]:
     session = MockSession()
     bot = Bot("123:abc", session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     bot._me = TgUser(id=BOT_ID, is_bot=True, first_name="Bot", username="bot")  # skip getMe
     ai = FakeAI()
-    dp = Dispatcher(repo=repo, ai=ai, settings=settings, jobs=None)
+    dp = Dispatcher(repo=repo, ai=ai, settings=settings, jobs=FakeJobs())
     dp.include_router(build_router())
     return dp, bot, session, ai
 
@@ -258,7 +286,7 @@ async def test_allow_listed_private_chat_is_served(settings: Settings, repo: Fak
     session = MockSession()
     bot = Bot("123:abc", session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     bot._me = TgUser(id=BOT_ID, is_bot=True, first_name="Bot", username="bot")
-    dp = Dispatcher(repo=repo, ai=FakeAI(), settings=settings, jobs=None)
+    dp = Dispatcher(repo=repo, ai=FakeAI(), settings=settings, jobs=FakeJobs())
     dp.include_router(build_router())
 
     await dp.feed_update(bot, _update("/start", chat_id=ME, chat_type="private"))
@@ -294,6 +322,82 @@ async def test_ukrainian_and_transliterated_command_aliases(harness, repo: FakeR
     # a bare Cyrillic "command" the bot does not know is left alone
     await dp.feed_update(bot, _update("/щось", message_id=7))
     assert "Записав тебе" in session.sent[-1]["text"]  # nothing new was sent
+
+
+async def test_water_subscribe_from_the_group(harness, repo: FakeRepo) -> None:
+    dp, bot, session, _ = harness
+    await dp.feed_update(bot, _update("/вода будні дні з 9 до 18 кожні 30 хвилин"))
+
+    row = repo.rows["water"][0]
+    assert row["user_id"] == ME and row["chat_id"] == CHAT_ID
+    assert row["days"] == "mon,tue,wed,thu,fri"
+    assert (row["start"], row["end"], row["every_min"]) == ("09:00", "18:00", 30)
+    assert (row["active"], row["tz"]) == ("TRUE", "Europe/Kyiv")
+    assert jobs_of(dp).reloads == 1
+
+    dm, confirmation = session.sent[-2], session.sent[-1]
+    assert dm["chat_id"] == ME and "09:00-18:00" in dm["text"]
+    assert confirmation["chat_id"] == CHAT_ID
+    assert "09:00" in confirmation["text"] and "18:00" in confirmation["text"]
+
+
+async def test_water_needs_the_private_chat_first(harness, repo: FakeRepo) -> None:
+    dp, bot, session, _ = harness
+    session.forbidden_chats.add(ME)
+    await dp.feed_update(bot, _update("/water weekdays from 9 to 18 every 30 min"))
+    assert repo.rows["water"] == []  # nothing stored while the bot cannot write
+    assert jobs_of(dp).reloads == 0
+    assert "t.me/bot?start=water" in session.sent[-1]["text"]
+
+    # a deleted private chat ("chat not found") gets the same advice ...
+    session.forbidden_chats.clear()
+    session.missing_chats.add(ME)
+    await dp.feed_update(bot, _update("/вода щодня кожну годину", message_id=2))
+    assert repo.rows["water"] == []
+    assert "t.me/bot?start=water" in session.sent[-1]["text"]
+
+
+async def test_water_status_stop_and_usage(harness, repo: FakeRepo) -> None:
+    dp, bot, session, _ = harness
+    await dp.feed_update(bot, _update("/вода"))
+    assert session.sent[-1]["text"] == i18n.WATER_USAGE
+    await dp.feed_update(bot, _update("/вода колись і як-небудь", message_id=2))
+    assert session.sent[-1]["text"] == i18n.WATER_USAGE
+    await dp.feed_update(bot, _update("/вода стоп", message_id=3))
+    assert session.sent[-1]["text"] == i18n.WATER_NOT_SUBSCRIBED
+
+    await dp.feed_update(bot, _update("/voda щодня кожну годину", message_id=4))
+    await dp.feed_update(bot, _update("/вода", message_id=5))
+    assert session.sent[-1]["text"] == i18n.WATER_STATUS.format(
+        schedule="щодня, 09:00-21:00, кожну годину", tz="Europe/Kyiv"
+    )
+
+    await dp.feed_update(bot, _update("/вода стоп", message_id=6))
+    assert session.sent[-1]["text"] == i18n.WATER_STOPPED
+    assert repo.rows["water"][0]["active"] == "FALSE"
+    await dp.feed_update(bot, _update("/вода", message_id=7))
+    assert session.sent[-1]["text"] == i18n.WATER_USAGE
+
+
+async def test_water_in_a_private_chat_only_for_members(harness, repo: FakeRepo) -> None:
+    dp, bot, session, _ = harness
+    dm = {"chat_id": ME, "chat_type": "private"}
+    await dp.feed_update(bot, _update("/вода щодня кожну годину", **dm))
+    assert session.sent[-1]["text"] == i18n.PRIVATE_CHAT_ONLY_GROUP
+    assert repo.rows["water"] == [] and len(repo.users) == 0  # a DM never registers anybody
+
+    await repo.upsert_user(User(user_id=ME, chat_id=CHAT_ID, name="Олексій", tz="Europe/Kyiv"))
+    await dp.feed_update(bot, _update("/вода щодня кожну годину", message_id=2, **dm))
+    assert repo.rows["water"][0]["chat_id"] == ME
+    # the private-chat message is itself the confirmation, so there is no second reply
+    assert len(session.sent) == 2 and session.sent[-1]["chat_id"] == ME
+
+
+async def test_private_start_greets_a_member(harness, repo: FakeRepo) -> None:
+    dp, bot, session, _ = harness
+    await repo.upsert_user(User(user_id=ME, chat_id=CHAT_ID, name="Олексій"))
+    await dp.feed_update(bot, _update("/start", chat_id=ME, chat_type="private"))
+    assert session.sent[-1]["text"] == i18n.WATER_DM_READY
 
 
 async def test_handler_error_is_reported_not_raised(harness, repo: FakeRepo) -> None:

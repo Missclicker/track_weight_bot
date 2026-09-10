@@ -21,3 +21,6 @@ dist/
 .vscode/
 .idea/
 .DS_Store
+
+# local agent notes
+CLAUDE.md

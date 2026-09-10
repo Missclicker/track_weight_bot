@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from html import escape
 
+from bot.parsing import WATER_ALL_DAYS, WATER_WEEKDAYS, WATER_WEEKEND, WaterSchedule
+
 FOOD_PREFIX = "≈"  # replies to messages starting with this are treated as kcal corrections
 
 PRIVATE_CHAT_ONLY_GROUP = "Цей бот працює лише в груповому чаті."
@@ -21,6 +23,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "sport": ("sport", "спорт"),
     "today": ("today", "sohodni", "сьогодні"),
     "week": ("week", "tyzhden", "тиждень", "звіт"),
+    "water": ("water", "voda", "вода"),
 }
 
 HELP = (
@@ -36,6 +39,7 @@ HELP = (
     "/sport біг 5 км 30 хв або /спорт ... - записати активність\n"
     "/today або /сьогодні - мій підсумок за сьогодні\n"
     "/week або /тиждень - тижневий звіт зараз\n"
+    "/water будні з 9 до 18 кожні 30 хв або /вода ... - нагадування пити воду в особисті\n"
     "/help або /довідка - ця довідка\n\n"
     "Оцінки з фото приблизні (±30-50 %). Щоб виправити - відповідай на оцінку числом ккал."
 )
@@ -64,6 +68,56 @@ CORRECTED_MARK = "Виправлено за твоїм уточненням."
 SPORT_USAGE = "Опиши активність: /sport біг 5 км 30 хв"
 SPORT_NOT_RECOGNIZED = 'Не розпізнав активність. Спробуй так: "біг 5 км 30 хв" або "зал 1 година".'
 SPORT_SAVED = "Записав: {activity}, {minutes} хв{distance} - близько {kcal} ккал."
+
+WATER_USAGE = (
+    "Нагадування пити воду. Напиши, коли і як часто:\n"
+    "/вода будні дні з 9 до 18 кожні 30 хвилин\n"
+    "/water щодня з 8:30 до 22:00 кожну годину\n"
+    "/voda пн, ср, пт 10-19 кожні 2 години\n\n"
+    "Дні: будні, вихідні, щодня, список (пн, ср, пт) або проміжок (пн-пт); типово щодня.\n"
+    "Час: з 9 до 18 або 9:00-18:00, в межах однієї доби; типово з 09:00 до 21:00.\n"
+    "Інтервал обов'язковий: від 15 хв до 12 год.\n"
+    "Мої нагадування: /вода. Вимкнути: /вода стоп."
+)
+WATER_SUBSCRIBED = (
+    "Нагадування про воду: {schedule}. За твоїм часом ({tz}).\n"
+    "Писатиму в особисті повідомлення. Вимкнути: /вода стоп."
+)
+WATER_SUBSCRIBED_DM = "Нагадування про воду: {schedule}. Писатиму сюди. Вимкнути: /вода стоп."
+WATER_PING = "Час випити склянку води."
+WATER_STATUS = (
+    "Нагадування про воду: {schedule}. За твоїм часом ({tz}).\n"
+    "Щоб змінити - надішли команду з новим розкладом. Вимкнути: /вода стоп."
+)
+WATER_STOPPED = "Вимкнув нагадування про воду."
+WATER_NOT_SUBSCRIBED = "Нагадувань про воду в тебе немає."
+WATER_NEED_DM = "Не можу написати тобі в особисті. Відкрий {link}, натисни Start і повтори команду."
+WATER_DM_READY = (
+    "Тепер я можу писати тобі сюди. Нагадування про воду: "
+    "/вода будні з 9 до 18 кожні 30 хв - тут або в групі."
+)
+
+_WATER_DAY_NAMES = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
+
+
+def fmt_water_schedule(schedule: WaterSchedule) -> str:
+    """One-line summary of a water schedule: "будні, 09:00-18:00, кожні 30 хв"."""
+    if schedule.days == WATER_ALL_DAYS:
+        days = "щодня"
+    elif schedule.days == WATER_WEEKDAYS:
+        days = "будні"
+    elif schedule.days == WATER_WEEKEND:
+        days = "вихідні"
+    else:
+        days = ", ".join(_WATER_DAY_NAMES[d] for d in sorted(schedule.days))
+    if schedule.every_min % 60:
+        every = f"кожні {schedule.every_min} хв"
+    else:
+        hours = schedule.every_min // 60
+        every = "кожну годину" if hours == 1 else f"кожні {hours} год"
+    window = f"{schedule.start:%H:%M}-{schedule.end:%H:%M}"
+    return f"{days}, {window}, {every}"
+
 
 PING_PREFIX = "Доброго ранку!"  # replies to bot messages starting with this count as weigh-ins
 PING = PING_PREFIX + " Ще не зважилися сьогодні: {mentions}. Відповідай на це повідомлення числом."

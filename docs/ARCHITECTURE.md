@@ -9,7 +9,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
                                     |
                                     +--->  Gemini API (google-genai, async client)
                                     |
-                               APScheduler (morning ping, weekly report)
+                               APScheduler (morning ping, water reminders, weekly report)
 ```
 
 ## Module map
@@ -19,13 +19,13 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/__main__.py` | Entry point. Loads settings (fails fast with a readable message), ensures the sheet schema, builds `Bot`/`Dispatcher`, injects dependencies, starts the scheduler and polling. |
 | `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist. |
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
-| `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `looks_like_sport`. |
+| `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `looks_like_sport`, `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators. |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
 | `bot/reports.py` | Aggregations: `today_summary` and `build_weekly_payload` (the JSON given to Gemini). |
-| `bot/scheduler.py` | `Jobs` (ping per timezone, weekly report) and `build_scheduler`. |
+| `bot/scheduler.py` | `Jobs` (ping per timezone, water tick, weekly report) and `build_scheduler`. |
 | `bot/handlers/` | aiogram routers, one file per feature; `__init__.py` assembles them and holds the allowed-chat gate and the global error handler. |
 
 ## Data flow
@@ -33,22 +33,24 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 **Message routing.** The root router has two children, tried in order. `guarded` carries the
 `AllowedChat` filter and drops every message whose `chat.id` is not in `ALLOWED_CHAT_IDS` (a
 private chat whose id is listed - e.g. the owner testing in a DM - is served like a group).
-`private` then answers `/start` from any other private chat with "works only in the group".
+`private` then serves the two commands that make sense outside the group: `/start` (a member is
+told the bot can now DM them, anybody else gets "works only in the group") and `/вода`.
 Inside `guarded` the routers are tried in order:
 
 1. `commands` - `/start /help /w /food /sport /today /week`.
-2. `corrections` - a reply to a bot message that starts with `≈` (the food-estimate prefix).
+2. `water` - `/вода` (`/water`, `/voda`): show, set or cancel the sender's water reminders.
+3. `corrections` - a reply to a bot message that starts with `≈` (the food-estimate prefix).
    A number -> `update_food_kcal(user_id, message_id)`. Any other text -> `get_food_entry`,
    re-download the photo by its stored `file_id` (if any), `GeminiClient.revise_food` with the
    earlier estimate + the user's text -> new `≈` reply -> `update_food_entry`, which also re-keys
    the row to the new reply's `message_id` so corrections can be chained. Both are scoped to the
    sender, so only the author of an entry can correct it and equal `message_id`s from different
    groups never collide.
-3. `weight` - a bare number in `[WEIGHT_MIN, WEIGHT_MAX]` that is not a reply, or a number in
+4. `weight` - a bare number in `[WEIGHT_MIN, WEIGHT_MAX]` that is not a reply, or a number in
    reply to the morning ping (recognised by the ping text, so it survives restarts) -> `add_weight`.
-4. `photos` - any photo -> Gemini vision -> reply -> `add_food` with the *reply's* `message_id`
+5. `photos` - any photo -> Gemini vision -> reply -> `add_food` with the *reply's* `message_id`
    so a later correction can find the row.
-5. `sport` - text matching a sport keyword -> Gemini text parse -> kcal from the MET table
+6. `sport` - text matching a sport keyword -> Gemini text parse -> kcal from the MET table
    -> `add_sport`.
 
 Filters return a `dict` on match (`{"kg": 84.3, "source": "text"}`), which aiogram injects into
@@ -68,6 +70,17 @@ users and (re)creates one cron job per timezone at `WEIGH_IN_DEADLINE`. The job 
 (`<a href="tg://user?id=...">`) everyone in that timezone without a `weight` row for today. The weekly job runs on `WEEKLY_REPORT_DAY` at
 `WEEKLY_REPORT_TIME` in `DEFAULT_TZ`: build payload -> Gemini -> send -> `reports` tab. If Gemini
 fails, the numeric summary is sent instead.
+
+**Water reminders.** One `water_tick` job runs every minute and walks an in-memory list of the
+active rows of the `water` tab, so a per-user interval costs neither a job per subscriber nor a
+Sheets read per minute. Each subscription carries its own zone key (copied from `users.tz` when it
+was created), the tick converts the current minute into that zone and `is_water_due` decides
+whether this minute is on the schedule's grid; the ping is a private message. The list is reloaded
+together with the ping jobs (startup, nightly 00:05) and by the `/вода` handler, so hand edits of
+the tab are picked up. `TelegramForbiddenError` (blocked bot, deleted chat) deactivates the row and
+drops it from memory; any other send error is logged and the remaining subscribers still get theirs.
+Telegram refuses a DM to a user who never pressed Start, so the handler sends the confirmation
+message first and stores the subscription only when it went through.
 
 **Errors.** A global error handler logs the exception and replies with a short "не вийшло,
 спробуй ще" (it only fires when a handler matched, so the sender was always waiting). The
