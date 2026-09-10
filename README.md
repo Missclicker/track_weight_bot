@@ -32,7 +32,7 @@ You need your own accounts and keys for everything below. Nothing is shared — 
 2. Copy the token (`123456789:AA...`) → this is `TELEGRAM_BOT_TOKEN`.
 3. Optional but recommended: `/setcommands` and paste
 
-   ```
+   ```t
    start - Зареєструватися і показати довідку
    w - Записати вагу: /w 84.3
    vaga - Те саме, що /w
@@ -77,13 +77,13 @@ By default a bot in a group only sees commands, @mentions and replies to itself.
 
 Sheet layout (for reference / manual edits):
 
-| tab | columns |
-| --- | --- |
-| `users` | `user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg, daily_kcal_target` |
-| `weight` | `ts, date, user_id, name, kg, source` |
-| `food` | `ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g, veg_share, confidence, source, message_id, corrected, photo_file_id` |
-| `sport` | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source` |
-| `reports` | `ts, week_start, chat_id, text` |
+| tab       | columns                                                                                                                                             |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `users`   | `user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg, daily_kcal_target`                                                  |
+| `weight`  | `ts, date, user_id, name, kg, source`                                                                                                               |
+| `food`    | `ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g, veg_share, confidence, source, message_id, corrected, photo_file_id` |
+| `sport`   | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source`                                                                             |
+| `reports` | `ts, week_start, chat_id, text`                                                                                                                     |
 
 ### 5. Gemini API key
 
@@ -149,7 +149,7 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 
      Optional shortcut — add to `~/.ssh/config` and then `ssh oracle` is enough:
 
-     ```
+     ```t
      Host oracle
          HostName <PUBLIC_IP>
          User opc
@@ -206,34 +206,34 @@ Updating: `git pull && docker compose up -d --build`.
 
 ## Configuration reference (`.env`)
 
-| var | required | meaning |
-| --- | --- | --- |
-| `TELEGRAM_BOT_TOKEN` | yes | from BotFather |
-| `ALLOWED_CHAT_IDS` | yes | comma-separated group ids the bot serves |
-| `GOOGLE_SHEET_ID` | yes | spreadsheet id |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | one of | path to JSON key, default `secrets/service_account.json` (docker-compose mounts `./secrets` and sets this to `/app/secrets/service_account.json`) |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | one of | full JSON content instead of a file |
-| `GEMINI_API_KEY` | yes | from AI Studio |
-| `GEMINI_VISION_MODEL` | no | default in `.env.example` |
-| `GEMINI_TEXT_MODEL` | no | default in `.env.example` |
-| `DEFAULT_TZ` | no | `Europe/Kyiv` |
-| `WEIGH_IN_DEADLINE` | no | `11:00` — reminder time |
-| `WEEKLY_REPORT_DAY` / `WEEKLY_REPORT_TIME` | no | `sun` / `20:00` |
-| `WEIGHT_MIN` / `WEIGHT_MAX` | no | `40` / `200` — bare-number detection range |
-| `LOG_LEVEL` | no | `INFO` |
+| var                                        | required | meaning                                                                                                                                           |
+| ------------------------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN`                       | yes      | from BotFather                                                                                                                                    |
+| `ALLOWED_CHAT_IDS`                         | yes      | comma-separated group ids the bot serves                                                                                                          |
+| `GOOGLE_SHEET_ID`                          | yes      | spreadsheet id                                                                                                                                    |
+| `GOOGLE_SERVICE_ACCOUNT_FILE`              | one of   | path to JSON key, default `secrets/service_account.json` (docker-compose mounts `./secrets` and sets this to `/app/secrets/service_account.json`) |
+| `GOOGLE_SERVICE_ACCOUNT_JSON`              | one of   | full JSON content instead of a file                                                                                                               |
+| `GEMINI_API_KEY`                           | yes      | from AI Studio                                                                                                                                    |
+| `GEMINI_VISION_MODEL`                      | no       | default in `.env.example`                                                                                                                         |
+| `GEMINI_TEXT_MODEL`                        | no       | default in `.env.example`                                                                                                                         |
+| `DEFAULT_TZ`                               | no       | `Europe/Kyiv`                                                                                                                                     |
+| `WEIGH_IN_DEADLINE`                        | no       | `11:00` — reminder time                                                                                                                           |
+| `WEEKLY_REPORT_DAY` / `WEEKLY_REPORT_TIME` | no       | `sun` / `20:00`                                                                                                                                   |
+| `WEIGHT_MIN` / `WEIGHT_MAX`                | no       | `40` / `200` — bare-number detection range                                                                                                        |
+| `LOG_LEVEL`                                | no       | `INFO`                                                                                                                                            |
 
 ## How the bot decides what a message is
 
-| message | action |
-| --- | --- |
-| photo (optionally with caption) | Gemini vision → kcal estimate → `food` |
-| bare number in `[WEIGHT_MIN, WEIGHT_MAX]`, e.g. `84.3` / `84,3` | weight → `weight` |
-| reply to the bot's morning ping with a number | weight |
-| reply to the bot's food estimate with a number | sets kcal of that estimate |
-| reply to the bot's food estimate with text (weight, ingredients, dish name) | Gemini re-estimates it (with the photo) and updates the row |
-| `/w`, `/food`, `/sport`, `/today`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands |
-| text mentioning sport keywords (біг, зал, велосипед, плавання, …) or `/sport` | Gemini text parse → `sport` |
-| anything else | ignored |
+| message                                                                                                            | action                                                      |
+| ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| photo (optionally with caption)                                                                                    | Gemini vision → kcal estimate → `food`                      |
+| bare number in `[WEIGHT_MIN, WEIGHT_MAX]`, e.g. `84.3` / `84,3`                                                    | weight → `weight`                                           |
+| reply to the bot's morning ping with a number                                                                      | weight                                                      |
+| reply to the bot's food estimate with a number                                                                     | sets kcal of that estimate                                  |
+| reply to the bot's food estimate with text (weight, ingredients, dish name)                                        | Gemini re-estimates it (with the photo) and updates the row |
+| `/w`, `/food`, `/sport`, `/today`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                           |
+| text mentioning sport keywords (біг, зал, велосипед, плавання, …) or `/sport`                                      | Gemini text parse → `sport`                                 |
+| anything else                                                                                                      | ignored                                                     |
 
 You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target` and `active` there can be edited by hand and are preserved.
 
