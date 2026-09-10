@@ -121,31 +121,84 @@ docker compose logs -f
 
 ### 7. Host it 24/7 on Oracle Cloud Always Free (optional)
 
-Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS). Oracle's Always Free tier gives an ARM VM permanently at no cost:
+Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS). Oracle's Always Free tier gives a small VM permanently at no cost:
 
 1. Sign up at <https://www.oracle.com/cloud/free/> (a card is required for identity check; Always Free resources are never billed — do **not** upgrade to Pay As You Go if you want a hard guarantee).
-2. **Compute → Instances → Create**. Shape **VM.Standard.A1.Flex** (Ampere ARM), e.g. 2 OCPU / 12 GB (up to 4 OCPU / 24 GB total is free). Image: **Ubuntu 24.04 (aarch64)**. Upload your SSH public key. Capacity for A1 in the home region is sometimes "out of host capacity" — retry later or use a different availability domain.
-3. SSH in and install Docker:
+2. **Compute → Instances → Create instance**.
+   - **Shape.** Two Always Free options:
+     - **VM.Standard.A1.Flex** (tab *Ampere*, ARM): up to 4 OCPU / 24 GB in total, e.g. 2 OCPU / 12 GB. Often "out of host capacity" for free accounts — retry later or try another availability domain.
+     - **VM.Standard.E2.1.Micro** (tab *Specialty and previous generation*, AMD x86): 1/8 OCPU, 1 GB RAM. Enough for this bot, which mostly waits on the network. Use it when A1 is not available.
+   - **Image.** Ubuntu 24.04 or Oracle Linux 9 — commands for both are below. The console picks the architecture matching the shape (aarch64 for A1, x86_64 for E2.1.Micro); the Docker image is multi-arch, so both work.
+   - **SSH key.** "Generate a key pair for me" is fine (Oracle does not keep the private half). Download the private key and move it out of *Downloads* into your SSH folder, not into a cloud-synced folder. On Windows the built-in OpenSSH refuses a key other accounts can read, so restrict it:
+
+     ```powershell
+     move $env:USERPROFILE\Downloads\ssh-key-*.key $env:USERPROFILE\.ssh\oracle.key
+     icacls "$env:USERPROFILE\.ssh\oracle.key" /inheritance:r /grant:r "$env:USERNAME:R"
+     ```
+
+   - **Networking.** The wizard may create the instance with no public IP and a subnet with no route to the internet — then nothing works, not even the bot's outbound polling. Once the instance is *Running*, on its page:
+     1. **Quick actions → Connect public subnet to internet → Connect.** Creates an internet gateway, a `0.0.0.0/0` route and a security group with the SSH rule.
+     2. **Attached VNICs → *your VNIC* → IPv4 addresses →** menu on the private IP **→ Edit → Public IP type: Ephemeral public IP.** The address appears on the instance page in a few seconds.
+
+     The subnet must show *Subnet access: Public* (**Networking → Virtual cloud networks → your VCN → Subnets**). A *Private* subnet cannot get a public IP and the flag cannot be changed afterwards — terminate the instance and recreate it in a public subnet. An ephemeral IP may change after a stop/start; the bot does not care (long polling makes no inbound connections), but your SSH config will. Reserve a public IP if you want it fixed — also free.
+   - **Connect.** The login user depends on the image: `opc` on Oracle Linux, `ubuntu` on Ubuntu.
+
+     ```bash
+     ssh -i ~/.ssh/oracle.key opc@<PUBLIC_IP>
+     ```
+
+     Optional shortcut — add to `~/.ssh/config` and then `ssh oracle` is enough:
+
+     ```
+     Host oracle
+         HostName <PUBLIC_IP>
+         User opc
+         IdentityFile ~/.ssh/oracle.key
+     ```
+
+3. SSH in and install git + Docker.
+
+   Ubuntu:
 
    ```bash
    sudo apt update && sudo apt install -y git docker.io docker-compose-v2
    sudo usermod -aG docker $USER && newgrp docker
    ```
 
-4. Deploy:
+   Oracle Linux 9 (no `apt`; Docker CE comes from Docker's own repository, the CentOS/RHEL one is the right one for Oracle Linux):
+
+   ```bash
+   sudo dnf install -y git nano dnf-plugins-core
+   sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+   sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+   sudo systemctl enable --now docker
+   sudo usermod -aG docker $USER && newgrp docker
+   ```
+
+   On the 1 GB **E2.1.Micro** add swap first, otherwise the image build can be killed for lack of memory:
+
+   ```bash
+   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   ```
+
+   Verify with `docker run --rm hello-world`. Outbound traffic is open by default on both images; no firewall changes are needed.
+
+4. Deploy (same on both images):
 
    ```bash
    git clone <your fork> track_weight_bot && cd track_weight_bot
    cp .env.example .env && nano .env            # paste your values
    mkdir -p secrets && nano secrets/service_account.json
    docker compose up -d --build
+   docker compose logs -f                       # expect "sheet ready" and "starting as @..."
    ```
 
    The container runs as an unprivileged user (uid 10001), so the key file must be readable by it: `chmod 644 secrets/service_account.json` (a `600` key makes the bot exit with `PermissionError` at startup).
 
-   `restart: unless-stopped` in `docker-compose.yml` brings the bot back after reboots. Long polling needs **no inbound ports** — leave the security list closed.
+   `restart: unless-stopped` in `docker-compose.yml` brings the bot back after reboots. Long polling needs **no inbound ports** — leave the security list as the quick action created it (SSH only).
 
-5. Set the VM timezone or rely on `DEFAULT_TZ=Europe/Kyiv` in `.env`; the scheduler uses per-user `tz` from the `users` tab with `DEFAULT_TZ` as fallback.
+5. Set the VM timezone (`sudo timedatectl set-timezone Europe/Kyiv`, both images) or rely on `DEFAULT_TZ=Europe/Kyiv` in `.env`; the scheduler uses per-user `tz` from the `users` tab with `DEFAULT_TZ` as fallback.
 
 Updating: `git pull && docker compose up -d --build`.
 
