@@ -66,6 +66,11 @@ def user_now(user: User, settings: Settings) -> datetime:
     return datetime.now(user_tz(user, settings))
 
 
+def is_personal_chat(chat_id: int) -> bool:
+    """True for a DM: Telegram gives a private chat the user's own id, and groups a negative one."""
+    return chat_id > 0
+
+
 class Jobs:
     """Job implementations bound to the bot's dependencies."""
 
@@ -172,24 +177,51 @@ class Jobs:
 
     # -- weekly report ----------------------------------------------------------------------
 
-    async def weekly_reports(self) -> None:
+    async def group_member_ids(self) -> set[int]:
+        """User ids active in any allowed group chat (used to skip redundant personal reports)."""
+        members: set[int] = set()
         for chat_id in self.settings.allowed_chat_ids:
+            if is_personal_chat(chat_id):
+                continue
+            members.update(u.user_id for u in await self.repo.get_active_users(chat_id))
+        return members
+
+    async def weekly_reports(self) -> None:
+        # Somebody who tracks in a group already gets their numbers in the group report; a second,
+        # identical report in their DM would just be noise. A DM's chat id is the user's own id.
+        try:
+            in_a_group = await self.group_member_ids()
+        except Exception:
+            # Reading the group rosters is only an optimisation: if Sheets is flaky here, fall back
+            # to an empty set so every chat still gets its report. A redundant DM report is
+            # recoverable noise; a week with no report at all is lost data nobody notices in time.
+            log.exception("could not list group members, sending every report including DMs")
+            in_a_group = set()
+        for chat_id in self.settings.allowed_chat_ids:
+            if is_personal_chat(chat_id) and chat_id in in_a_group:
+                log.info("skipping personal weekly report for %s: covered by a group", chat_id)
+                continue
             try:
                 await self.run_weekly_report(chat_id)
             except Exception:
                 log.exception("weekly report failed for chat %s", chat_id)
 
     async def run_weekly_report(self, chat_id: int, today: date | None = None) -> str:
-        """Build, send and store the report for the 7 days ending today. Returns the text."""
+        """Build, send and store the report for the 7 full days before `today`.
+
+        Today is deliberately left out: the job runs on Monday morning, so the report covers the
+        week that just ended (previous Monday..Sunday) and never a half-logged current day.
+        """
         today = today or datetime.now(self.settings.tzinfo).date()
-        week_start = today - timedelta(days=6)
+        week_end = today - timedelta(days=1)
+        week_start = week_end - timedelta(days=6)
         payload = await build_weekly_payload(self.repo, chat_id, week_start)
-        header = i18n.WEEKLY_HEADER.format(start=week_start.isoformat(), end=today.isoformat())
+        header = i18n.WEEKLY_HEADER.format(start=week_start.isoformat(), end=week_end.isoformat())
         if not payload["users"]:
             text = f"{header}\n{i18n.WEEKLY_NO_DATA}"
         else:
             try:
-                body = await self.ai.weekly_report(payload)
+                body = await self.ai.weekly_report(payload, personal=is_personal_chat(chat_id))
                 text = f"{header}\n\n{body}"
             except Exception:
                 log.exception("Gemini weekly report failed, sending numbers only")

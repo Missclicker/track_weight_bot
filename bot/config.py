@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     gemini_text_model: str = "gemini-2.5-flash-lite"
     default_tz: str = "Europe/Kyiv"
     weigh_in_deadline: str = "11:00"
-    weekly_report_day: str = "sun"
-    weekly_report_time: str = "20:00"
+    weekly_report_day: str = "mon"
+    weekly_report_time: str = "09:00"
     weight_min: float = Field(default=40, gt=0)
     weight_max: float = Field(default=200, gt=0)
     log_level: str = "INFO"

@@ -74,8 +74,13 @@ aggregations.
 **Scheduler.** At startup and nightly at 00:05 the bot collects the distinct timezones of active
 users and (re)creates one cron job per timezone at `WEIGH_IN_DEADLINE`. The job mentions
 (`<a href="tg://user?id=...">`) everyone in that timezone without a `weight` row for today. The weekly job runs on `WEEKLY_REPORT_DAY` at
-`WEEKLY_REPORT_TIME` in `DEFAULT_TZ`: build payload -> Gemini -> send -> `reports` tab. If Gemini
-fails, the numeric summary is sent instead.
+`WEEKLY_REPORT_TIME` in `DEFAULT_TZ` (default Monday 09:00): build payload -> Gemini -> send ->
+`reports` tab. If Gemini fails, the numeric summary is sent instead. The window is always the 7
+*full* days before the run (`today - 7 .. today - 1`), so the current, half-logged day never
+skews the numbers. A chat with a positive id is a DM: it gets `PERSONAL_REPORT_PROMPT` instead of
+the group one, and the scheduled run skips it entirely when that user is also an active member of
+one of the allowed group chats (they already get their numbers there). `/week` ignores that skip -
+an explicit ask is always answered.
 
 **Water reminders.** One `water_tick` job runs every minute and walks an in-memory list of the
 active rows of the `water` tab, so a per-user interval costs neither a job per subscriber nor a

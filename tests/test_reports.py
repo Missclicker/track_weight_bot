@@ -124,6 +124,7 @@ def test_weekly_stats_block_formats_delta() -> None:
             "name": "Олексій <b>",
             "kcal_total": 3000,
             "kcal_avg_per_day": 1500,
+            "days_with_food_logged": 2,
             "alcohol_kcal": 200,
             "sport_minutes": 90,
             "sport_kcal": 750,
@@ -135,6 +136,7 @@ def test_weekly_stats_block_formats_delta() -> None:
     assert "Олексій <b>" in block  # sent with parse_mode=None, so not HTML-escaped
     assert "-0.8" in block
     assert "85 -> 84.2" in block
+    assert "≈1500/день за 2 дн. із записами" in block  # not 3000/7
 
 
 async def test_day_food_keeps_order_and_totals(repo: FakeRepo, user: User) -> None:

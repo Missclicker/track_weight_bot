@@ -43,7 +43,7 @@ HELP = (
     "/today або /сьогодні - мій підсумок за сьогодні\n"
     "/kcal або /калорії - що я з'їв сьогодні і скільки це ккал\n"
     "/target 2000 або /ціль 2000 - денна ціль ккал (необов'язково; /ціль стоп - прибрати)\n"
-    "/week або /тиждень - тижневий звіт зараз\n"
+    "/week або /тиждень - звіт за 7 останніх повних днів (без сьогодні)\n"
     "/water будні з 9 до 18 кожні 30 хв або /вода ... - нагадування пити воду в особисті\n"
     "/help або /довідка - ця довідка\n\n"
     "Оцінки з фото приблизні (±30-50 %). Щоб виправити - відповідай на оцінку числом ккал."
@@ -279,9 +279,15 @@ def kcal_today(
 def weekly_stats_block(user: dict) -> str:
     """Plain numeric block per user, used as a fallback when the AI report fails."""
     name = str(user["name"])  # sent with parse_mode=None, so no escaping here
-    parts = [
-        f"{name}: {user['kcal_total']:.0f} ккал за тиждень (≈{user['kcal_avg_per_day']:.0f}/день)",
-    ]
+    # The average is per logged day, not per calendar day, so the day count is spelled out: a
+    # week with three logged days must not read as an average over seven.
+    days = user["days_with_food_logged"]
+    total = f"{name}: {user['kcal_total']:.0f} ккал за тиждень"
+    # With no food rows at all the average and the day count are both zero: the parenthetical
+    # would say nothing, so it is dropped (such a user is here for sport or weight only).
+    if days:
+        total += f" (≈{user['kcal_avg_per_day']:.0f}/день за {days} дн. із записами)"
+    parts = [total]
     if user["alcohol_kcal"]:
         parts.append(f"алкоголь {user['alcohol_kcal']:.0f} ккал")
     if user["sport_minutes"]:

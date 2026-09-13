@@ -127,14 +127,38 @@ SPORT_PROMPT = (
     "Message: {text}"
 )
 
+# `kcal_avg_per_day` is averaged over the days food was actually logged, so the model must not
+# recompute it from the weekly total: a week with three logged days would otherwise read as a
+# starvation week. Both report prompts say so.
+_DATA_NOTES = (
+    "The JSON covers the 7 full days ending on week_end (week_start..week_end); the current day "
+    "is not in it. `kcal_avg_per_day` is the average over `days_with_food_logged` - "
+    "the days food was actually logged - not over all 7 days: never divide weekly totals by 7 "
+    "yourself, and treat days without entries as missed logging, not as days without eating. "
+    "A logged day may also be only partially logged, so hedge instead of presenting a low average "
+    "as proven undereating. Do not invent data that is not in the JSON."
+)
+
 REPORT_PROMPT = (
     "You are a friendly, concise coach for a small Ukrainian friend group that tracks food, sport "
-    "and weight together. Below is the JSON with each person's last 7 days: kcal intake, alcohol "
-    "kcal, sport, macros, vegetable share and weight change. Write a weekly report IN UKRAINIAN, "
+    "and weight together. Below is the JSON with each person's week: kcal intake, alcohol kcal, "
+    "sport, macros, vegetable share and weight change. Write a weekly report IN UKRAINIAN, "
     "plain text without markdown, at most ~1500 characters. For each person: 2-3 sentences with "
     "the key numbers and one concrete, kind recommendation (adjust daily kcal target, sport, "
     "vegetables/protein ratio, alcohol). Finish with one short line for the whole group. "
-    "Do not invent data that is not in the JSON.\n\nDATA:\n{payload}"
+    + _DATA_NOTES
+    + "\n\nDATA:\n{payload}"
+)
+
+PERSONAL_REPORT_PROMPT = (
+    "You are a friendly, concise coach for one person who tracks food, sport and weight with a "
+    "Telegram bot. Below is the JSON with their week: kcal intake, alcohol kcal, sport, macros, "
+    "vegetable share and weight change. Write a weekly report IN UKRAINIAN addressed directly to "
+    "them (second person singular, informal), plain text without markdown, at most ~1200 "
+    "characters: 4-6 sentences with the key numbers, what went well, and one or two concrete, "
+    "kind recommendations (adjust daily kcal target, sport, vegetables/protein ratio, alcohol). "
+    "There is no group here: do not address or compare anybody else and do not add a closing "
+    "line about the whole group. " + _DATA_NOTES + "\n\nDATA:\n{payload}"
 )
 
 
@@ -259,7 +283,12 @@ class GeminiClient:
             kcal=kcal,
         )
 
-    async def weekly_report(self, payload: dict[str, Any]) -> str:
-        """Ukrainian weekly report text for one chat."""
-        prompt = REPORT_PROMPT.format(payload=json.dumps(payload, ensure_ascii=False, indent=1))
+    async def weekly_report(self, payload: dict[str, Any], personal: bool = False) -> str:
+        """Ukrainian weekly report text for one chat.
+
+        `personal=True` is the report of a one-person chat (a DM): the group wording and the
+        closing line about the group make no sense there.
+        """
+        template = PERSONAL_REPORT_PROMPT if personal else REPORT_PROMPT
+        prompt = template.format(payload=json.dumps(payload, ensure_ascii=False, indent=1))
         return (await self._generate(self._text_model, [prompt], None)).strip()

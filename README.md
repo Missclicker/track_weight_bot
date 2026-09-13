@@ -6,7 +6,7 @@ A small Telegram bot for a friend group that wants to lose weight together. It l
 2. **Records weight** when someone posts a number like `84.3` (or replies to the morning ping).
 3. **Pings everyone who hasn't weighed in by 11:00.**
 4. **Logs sport** from free text ("пробіг 5 км за 30 хв") as negative calories.
-5. **Posts a weekly AI report** — intake, sport, weight trend, and recommendations (kcal target, veg/protein ratio).
+5. **Posts a weekly AI report** every Monday morning about the week that just ended — intake, sport, weight trend, and recommendations (kcal target, veg/protein ratio). In a one-to-one chat the text is written for you alone; that personal report is skipped if you already get one in a group.
 6. **Reminds you to drink water** in a private message, on a schedule you pick yourself (`/вода будні з 9 до 18 кожні 30 хвилин`).
 
 Everything runs on free tiers: a Python bot with long polling (no public endpoint needed), Google Sheets as the database, Gemini Flash for AI. Estimated cost: **$0/month**. Bot replies are in Ukrainian by default (see `bot/i18n.py`).
@@ -46,7 +46,7 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    kalorii - Те саме, що /kcal
    target - Денна ціль ккал (необов'язково): /target 2000, прибрати: /target стоп
    tsil - Те саме, що /target
-   week - Тижневий звіт зараз
+   week - Звіт за 7 останніх повних днів
    tyzhden - Те саме, що /week
    water - Нагадування пити воду: /water будні з 9 до 18 кожні 30 хв
    voda - Те саме, що /water
@@ -219,6 +219,8 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
    docker compose logs -f                       # expect "sheet ready" and "starting as @..."
    ```
 
+   The `git diff` also shows **changed defaults** of variables you already have: a value pinned in your `.env` keeps overriding the new default, so copy those over by hand too. Concretely, if your `.env` still has `WEEKLY_REPORT_DAY=sun` / `WEEKLY_REPORT_TIME=20:00`, set `WEEKLY_REPORT_DAY=mon` and `WEEKLY_REPORT_TIME=09:00` — otherwise the report keeps running on Sunday evening while already covering only the days before it, silently skipping that Sunday.
+
    `up -d --build` rebuilds the image from the pulled code and recreates the container only if the image changed; the bot is offline for the few seconds between the old container stopping and the new one polling. `.env` and `secrets/` are untracked, so `git pull` never touches them. Missing sheet tabs or trailing columns are created automatically at startup, so no manual spreadsheet migration is needed.
 
    If the release added or renamed commands, refresh the menu in @BotFather with `/setcommands` (block in step 1). Follow-ups:
@@ -246,7 +248,7 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | `GEMINI_TEXT_MODEL`                        | no       | default in `.env.example`                                                                                                                         |
 | `DEFAULT_TZ`                               | no       | `Europe/Kyiv`                                                                                                                                     |
 | `WEIGH_IN_DEADLINE`                        | no       | `11:00` — reminder time                                                                                                                           |
-| `WEEKLY_REPORT_DAY` / `WEEKLY_REPORT_TIME` | no       | `sun` / `20:00`                                                                                                                                   |
+| `WEEKLY_REPORT_DAY` / `WEEKLY_REPORT_TIME` | no       | `mon` / `09:00` — the report covers the 7 full days before the run                                                                                |
 | `WEIGHT_MIN` / `WEIGHT_MAX`                | no       | `40` / `200` — bare-number detection range                                                                                                        |
 | `LOG_LEVEL`                                | no       | `INFO`                                                                                                                                            |
 
