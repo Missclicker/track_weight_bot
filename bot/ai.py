@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from google import genai
@@ -21,10 +22,50 @@ from bot import met
 
 log = logging.getLogger(__name__)
 
-REQUEST_TIMEOUT_S = 45.0
-_TRANSIENT_CODES = frozenset({429, 500, 502, 503, 504})
-_RETRIES = 1
+# One deadline per attempt, in seconds. The SDK turns `http_options.timeout` into an
+# `X-Server-Timeout` header, so Google's backend enforces *our* deadline and answers
+# 504 DEADLINE_EXCEEDED when the model needs longer - retrying with the same 45 s during busy
+# hours can never succeed, hence the escalation.
+_ATTEMPT_TIMEOUTS_S = (45.0, 75.0, 120.0)
+_RETRY_DELAYS_S = (1.5, 3.0)  # one per gap between attempts
+# The outer `asyncio.wait_for` must lose the race against the SDK's own deadline, otherwise a bare
+# client-side TimeoutError masks the server's informative 504. It stays only as a backstop.
+_TIMEOUT_GRACE_S = 5.0
+_TRANSIENT_CODES = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_PORTION_CHARS = 40
+
+# aiohttp and httpx both arrive transitively (aiogram / google-genai) rather than as declared
+# dependencies, and the SDK picks its transport at runtime, so neither import is guaranteed:
+# a missing one simply contributes no retryable types.
+_TRANSPORT_ERRORS: tuple[type[Exception], ...] = ()
+try:
+    import aiohttp
+except ImportError:  # pragma: no cover - aiohttp ships with aiogram
+    pass
+else:
+    _TRANSPORT_ERRORS += (
+        aiohttp.ClientConnectorError,
+        aiohttp.ServerDisconnectedError,
+        aiohttp.ClientOSError,
+    )
+try:
+    import httpx
+except ImportError:  # pragma: no cover - httpx ships with google-genai
+    pass
+else:
+    _TRANSPORT_ERRORS += (httpx.TimeoutException, httpx.ConnectError)
+
+# ValueError is ours: an empty response body (see `_generate`).
+_RETRYABLE: tuple[type[Exception], ...] = (
+    genai_errors.APIError,
+    TimeoutError,
+    ValueError,
+    *_TRANSPORT_ERRORS,
+)
+
+# Called at most once per public call, just before the first backoff sleep, so an interactive
+# call site can tell the user the answer is late. The result is ignored.
+RetryNotice = Callable[[], Awaitable[Any]]
 
 
 class FoodEstimate(BaseModel):
@@ -187,15 +228,22 @@ class GeminiClient:
     """Thin async wrapper around `google.genai.Client`."""
 
     def __init__(self, api_key: str, vision_model: str, text_model: str) -> None:
+        # Only a floor for calls that do not carry their own `http_options`: `_generate` overrides
+        # this per attempt, and the client-level value must not pin every attempt to the shortest
+        # deadline.
         self._client = genai.Client(
             api_key=api_key,
-            http_options=types.HttpOptions(timeout=int(REQUEST_TIMEOUT_S * 1000)),
+            http_options=types.HttpOptions(timeout=int(_ATTEMPT_TIMEOUTS_S[-1] * 1000)),
         )
         self._vision_model = vision_model
         self._text_model = text_model
 
     async def _generate(
-        self, model: str, contents: list[Any], schema: type[BaseModel] | None
+        self,
+        model: str,
+        contents: list[Any],
+        schema: type[BaseModel] | None,
+        on_retry: RetryNotice | None = None,
     ) -> str:
         config = types.GenerateContentConfig(
             temperature=0.2,
@@ -207,29 +255,44 @@ class GeminiClient:
             config.response_mime_type = "application/json"
             config.response_schema = schema
         last_exc: Exception | None = None
-        for attempt in range(_RETRIES + 1):
+        notified = False
+        for attempt, deadline in enumerate(_ATTEMPT_TIMEOUTS_S):
+            # Per-request http options win over the client-level ones (`patch_http_options` in the
+            # SDK), and the merged value drives both the transport timeout and `X-Server-Timeout`.
+            config.http_options = types.HttpOptions(timeout=int(deadline * 1000))
             try:
                 response = await asyncio.wait_for(
                     self._client.aio.models.generate_content(
                         model=model, contents=contents, config=config
                     ),
-                    timeout=REQUEST_TIMEOUT_S,
+                    timeout=deadline + _TIMEOUT_GRACE_S,
                 )
                 if not response.text:
                     raise ValueError("empty Gemini response")
                 return response.text
-            except (genai_errors.APIError, TimeoutError, ValueError) as exc:
+            except _RETRYABLE as exc:
                 last_exc = exc
                 log.warning("Gemini %s failed (attempt %d): %s", model, attempt + 1, exc)
                 if isinstance(exc, genai_errors.APIError) and exc.code not in _TRANSIENT_CODES:
                     break  # 400/403/404: bad key or retired model - retrying won't help
-                if attempt < _RETRIES:
-                    await asyncio.sleep(1.5)
+                if attempt >= len(_RETRY_DELAYS_S):
+                    break
+                if on_retry is not None and not notified:
+                    notified = True  # set first: one notice per public call, even if it fails
+                    try:
+                        await on_retry()
+                    except Exception:  # a courtesy message must never cost us the retry
+                        log.warning("could not send the Gemini retry notice", exc_info=True)
+                await asyncio.sleep(_RETRY_DELAYS_S[attempt])
         assert last_exc is not None
         raise last_exc
 
     async def estimate_food(
-        self, image_bytes: bytes | None, mime: str | None, caption: str | None
+        self,
+        image_bytes: bytes | None,
+        mime: str | None,
+        caption: str | None,
+        on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
         """Estimate a meal from a photo (with optional caption) or from text only."""
         # The caption is user text: keep it clearly delimited so it reads as data, not as
@@ -249,7 +312,7 @@ class GeminiClient:
         else:
             contents = [FOOD_PROMPT.format(source=" described by the user") + caption_block]
             model = self._text_model
-        raw = await self._generate(model, contents, FoodEstimate)
+        raw = await self._generate(model, contents, FoodEstimate, on_retry)
         return FoodEstimate.model_validate_json(raw)
 
     async def revise_food(
@@ -258,6 +321,7 @@ class GeminiClient:
         mime: str | None,
         previous: dict[str, Any],
         correction: str,
+        on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
         """Re-estimate a meal after the user corrected it in free text (weight, ingredients...)."""
         fields = (
@@ -285,13 +349,15 @@ class GeminiClient:
                 REVISE_PROMPT.format(source="", previous=earlier, correction=correction.strip())
             ]
             model = self._text_model
-        raw = await self._generate(model, contents, FoodEstimate)
+        raw = await self._generate(model, contents, FoodEstimate, on_retry)
         return FoodEstimate.model_validate_json(raw)
 
-    async def parse_sport(self, text: str, weight_kg: float | None) -> SportEntry | None:
+    async def parse_sport(
+        self, text: str, weight_kg: float | None, on_retry: RetryNotice | None = None
+    ) -> SportEntry | None:
         """Parse a sport sentence; kcal comes from the MET table, not from the model."""
         prompt = SPORT_PROMPT.format(keys=", ".join(met.ACTIVITIES), text=text.strip())
-        raw = await self._generate(self._text_model, [prompt], SportParse)
+        raw = await self._generate(self._text_model, [prompt], SportParse, on_retry)
         parsed = SportParse.model_validate_json(raw)
         key = parsed.activity.strip().lower()
         if key == "none" or not key:
@@ -313,7 +379,12 @@ class GeminiClient:
             kcal=kcal,
         )
 
-    async def weekly_report(self, payload: dict[str, Any], personal: bool = False) -> str:
+    async def weekly_report(
+        self,
+        payload: dict[str, Any],
+        personal: bool = False,
+        on_retry: RetryNotice | None = None,
+    ) -> str:
         """Ukrainian weekly report text for one chat.
 
         `personal=True` is the report of a one-person chat (a DM): the group wording and the
@@ -321,4 +392,4 @@ class GeminiClient:
         """
         template = PERSONAL_REPORT_PROMPT if personal else REPORT_PROMPT
         prompt = template.format(payload=json.dumps(payload, ensure_ascii=False, indent=1))
-        return (await self._generate(self._text_model, [prompt], None)).strip()
+        return (await self._generate(self._text_model, [prompt], None, on_retry)).strip()

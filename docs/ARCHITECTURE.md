@@ -21,7 +21,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
 | `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `parse_kcal_target`, `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
-| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators. |
+| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food`, `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below). |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
 | `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies), `today_summary` and `build_weekly_payload` (the JSON given to Gemini). |
@@ -113,6 +113,27 @@ the tab are picked up. `TelegramForbiddenError` (blocked bot, deleted chat) deac
 drops it from memory; any other send error is logged and the remaining subscribers still get theirs.
 Telegram refuses a DM to a user who never pressed Start, so the handler sends the confirmation
 message first and stores the subscription only when it went through.
+
+**Gemini retries.** `GeminiClient._generate` makes up to three attempts (`_ATTEMPT_TIMEOUTS_S`)
+with backoff sleeps of 1.5 s and 3 s, the same shape as `sheets.with_retry`. The deadline
+*escalates* per attempt - 45 s, 75 s, 120 s - because the SDK turns `http_options.timeout` into an
+`X-Server-Timeout` header: Google's backend enforces our own deadline and answers
+`504 DEADLINE_EXCEEDED` when the model needs longer, so retrying with the same 45 s during busy
+hours can never succeed. Each attempt therefore passes its own `types.HttpOptions` on the
+`GenerateContentConfig`; per-request options win over the client-level ones in the SDK and drive
+both the transport timeout and that header. The outer `asyncio.wait_for` keeps a `_TIMEOUT_GRACE_S`
+margin over the attempt's deadline so it stays a backstop and the SDK's informative error surfaces
+first. Retried: transient API codes (408/429/5xx), an empty response body, and aiohttp/httpx
+transport failures (both arrive transitively, so the imports are guarded); 400/403/404 break out
+after one attempt - a bad key or a retired model will not fix itself.
+
+The four public methods take an optional `on_retry` callback that fires *once* per call, just
+before the first backoff sleep. The interactive call sites (`photos.on_photo`,
+`commands._record_food_text`, `corrections.on_text_correction`, `sport.record_sport`) pass
+`partial(message.reply, i18n.AI_RETRYING)`, so somebody waiting on a slow estimate is told the
+answer is late instead of staring at silence; the notice is left in the chat. A send that fails is
+logged and the retry continues. `scheduler.run_weekly_report` passes no callback: nobody waits on
+a background job and it already degrades to the numbers-only fallback.
 
 **Errors.** A global error handler logs the exception and replies with a short "не вийшло,
 спробуй ще" (it only fires when a handler matched, so the sender was always waiting). The
