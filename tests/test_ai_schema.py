@@ -64,6 +64,15 @@ def test_food_estimate_portion_is_flattened_to_one_line() -> None:
     assert _reply(est).splitlines()[0].endswith(", 400 г або 2 порції")
 
 
+def test_food_estimate_dish_is_flattened_too() -> None:
+    """`dish` shares the line with `portion`, so a newline in it splits the line just the same."""
+    est = FoodEstimate.model_validate({**SAMPLE, "dish": "картопля\nз мясом", "portion": "400 г"})
+    assert est.dish == "картопля з мясом"
+    assert _reply(est).splitlines()[0].endswith("картопля з мясом, 400 г")
+    # unlike `portion`, `dish` is not capped: a long dish name stays whole
+    assert FoodEstimate.model_validate({**SAMPLE, "dish": "щось " * 30}).dish.count("щось") == 30
+
+
 def test_food_estimate_requires_dish_and_kcal() -> None:
     with pytest.raises(ValidationError):
         FoodEstimate.model_validate({"dish": "щось"})

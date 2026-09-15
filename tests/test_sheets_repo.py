@@ -267,7 +267,9 @@ async def test_delete_food_entry_removes_the_row_and_returns_it(repo: SheetsRepo
     assert await repo.delete_food_entry(1, 42) is None  # already gone
 
 
-async def test_delete_abandons_a_row_that_moved_since_the_find(repo: SheetsRepo, monkeypatch):
+async def test_delete_abandons_a_row_that_moved_since_the_find(
+    repo: SheetsRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A row number goes stale the moment an earlier row disappears (a hand edit, a lost retry).
 
     The delete must then remove nothing at all rather than whatever slid into that position.

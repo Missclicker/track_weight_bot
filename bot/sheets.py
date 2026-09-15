@@ -326,13 +326,14 @@ class SheetsRepo:
         self._worksheets: dict[str, gspread.Worksheet] = {}
         self._users_cache: tuple[float, list[User]] | None = None
         self.service_account_email: str | None = None
-        # Serialises the find-then-delete pairs below: a row number is only valid until somebody
+        # Serialises the find-then-write pairs below (deletes and corrections alike): a row
+        # number is only valid until somebody
         # removes an earlier row, and aiogram handles every update in its own task (so two deletes
         # run in two `asyncio.to_thread` workers). A plain in-process lock is enough because the
         # bot is a single polling instance by design ("Long polling, not webhooks" in
         # docs/ARCHITECTURE.md). It cannot cover a human editing the spreadsheet at the same
         # moment - that is what the re-read in `_delete_confirmed_row_sync` is for.
-        self._delete_lock = asyncio.Lock()
+        self._row_lock = asyncio.Lock()
 
     # -- connection -------------------------------------------------------------------------
 
@@ -676,9 +677,13 @@ class SheetsRepo:
 
     async def update_food_kcal(self, user_id: int, message_id: int, kcal: float) -> bool:
         """Set `kcal` on the food row announced in `message_id`; False if it is not the sender's."""
-        return await self._run(
-            self._update_food_cells_sync, user_id, message_id, {"kcal": kcal, "corrected": "TRUE"}
-        )
+        async with self._row_lock:
+            return await self._run(
+                self._update_food_cells_sync,
+                user_id,
+                message_id,
+                {"kcal": kcal, "corrected": "TRUE"},
+            )
 
     async def update_food_entry(
         self, user_id: int, message_id: int, est: FoodEstimate, new_message_id: int
@@ -698,14 +703,15 @@ class SheetsRepo:
             "message_id": new_message_id,
             "corrected": "TRUE",
         }
-        return await self._run(self._update_food_cells_sync, user_id, message_id, values)
+        async with self._row_lock:
+            return await self._run(self._update_food_cells_sync, user_id, message_id, values)
 
     # -- deletions --------------------------------------------------------------------------
 
     def _delete_confirmed_row_sync(
         self, tab: str, row_no: int, user_id: int, message_id: int
-    ) -> bool:
-        """Delete row `row_no` of `tab`, but only if it is still the row that was looked up.
+    ) -> list[str] | None:
+        """Delete row `row_no` of `tab` if it is still the row that was looked up; its cells.
 
         A find and a delete are two API calls and cannot be made atomic, so the row is re-read
         immediately before it is removed: if anything shifted the rows in between (a hand edit of
@@ -727,18 +733,21 @@ class SheetsRepo:
             or current[col_msg] != str(message_id)
         ):
             log.warning("%s row %d moved before the delete; nothing removed", tab, row_no)
-            return False
+            return None
         self._ws(tab).delete_rows(row_no)
-        return True
+        # the confirmed cells, not the older find snapshot: the re-read exists precisely because
+        # the snapshot may be stale, so the caller must not go on to use it either
+        return current
 
     def _delete_food_row_sync(self, user_id: int, message_id: int) -> dict[str, str] | None:
         found = self._find_food_row_sync(user_id, message_id)
         if found is None:
             return None
-        row_no, row = found
-        if not self._delete_confirmed_row_sync("food", row_no, user_id, message_id):
+        row_no, _ = found
+        deleted = self._delete_confirmed_row_sync("food", row_no, user_id, message_id)
+        if deleted is None:
             return None
-        return row
+        return dict(zip(HEADERS["food"], deleted, strict=False))
 
     async def delete_food_entry(self, user_id: int, message_id: int) -> dict[str, Any] | None:
         """Drop the food row announced in `message_id`; the deleted row, or None if not found.
@@ -748,7 +757,7 @@ class SheetsRepo:
         having to learn about the flag. The row is returned so the caller can recompute the day
         total for the date it belonged to without a second scan of the tab.
         """
-        async with self._delete_lock:  # the row number must stay valid until the delete lands
+        async with self._row_lock:  # the row number must stay valid until the delete lands
             row = await self._run(self._delete_food_row_sync, user_id, message_id)
         return None if row is None else _food_entry(row)
 
@@ -756,11 +765,11 @@ class SheetsRepo:
         row_no = self._find_sport_row_sync(user_id, message_id)
         if row_no is None:
             return False
-        return self._delete_confirmed_row_sync("sport", row_no, user_id, message_id)
+        return self._delete_confirmed_row_sync("sport", row_no, user_id, message_id) is not None
 
     async def delete_sport_entry(self, user_id: int, message_id: int) -> bool:
         """Drop the sport row announced in `message_id`; False if it is not the sender's."""
-        async with self._delete_lock:
+        async with self._row_lock:
             return await self._run(self._delete_sport_row_sync, user_id, message_id)
 
     # -- queries ----------------------------------------------------------------------------

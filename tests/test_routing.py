@@ -636,7 +636,9 @@ async def test_reply_videly_deletes_the_sport_row(harness, repo: FakeRepo) -> No
     assert session.sent[-1]["text"] == i18n.SPORT_NOT_FOUND_FOR_DELETE
 
 
-async def test_a_non_delete_reply_to_a_sport_confirmation_is_ignored(harness, repo: FakeRepo):
+async def test_a_non_delete_reply_to_a_sport_confirmation_is_ignored(
+    harness, repo: FakeRepo
+) -> None:
     """The sport router deletes and nothing else: re-estimating an activity is out of scope, and
     a reply must not become a second workout the way free text used to."""
     dp, bot, session, ai = harness
