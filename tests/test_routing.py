@@ -1,8 +1,7 @@
 """End-to-end routing through a real aiogram Dispatcher with a mocked Telegram session.
 
 Checks that a text message lands in the right handler (weight / correction / prompt reply /
-ignored)
-and that the allowed-chat gate works. Gemini and Sheets are replaced by fakes.
+ignored) and that the allowed-chat gate works. Gemini and Sheets are replaced by fakes.
 """
 
 from __future__ import annotations
@@ -449,11 +448,14 @@ async def test_food_reply_has_no_confidence_line_but_the_row_keeps_it(harness, r
 
 async def test_bare_food_command_asks_for_the_text(harness, repo: FakeRepo) -> None:
     dp, bot, session, ai = harness
+    # seeded so the assertion below can tell "was not consumed" from "was never there"
+    unused = FoodEstimate(dish="омлет", kcal=500)
+    ai.food_estimates = [unused]
     for message_id, command in enumerate(("/food", "/їжа", "/yizha"), start=1):
         await dp.feed_update(bot, _update(command, message_id=message_id))
         assert session.sent[-1]["text"] == i18n.FOOD_INPUT_PROMPT
         assert session.sent[-1]["reply_markup"]["force_reply"] is True
-    assert ai.food_estimates == []  # nothing was asked of Gemini ...
+    assert ai.food_estimates == [unused]  # nothing was asked of Gemini ...
     assert repo.rows["food"] == []  # ... and nothing was stored
 
 
@@ -469,6 +471,16 @@ async def test_reply_to_the_food_prompt_is_recorded(harness, repo: FakeRepo) -> 
     reply = session.sent[-1]["text"]
     assert reply.startswith(i18n.FOOD_PREFIX + " 500")
     assert i18n.day_total(500, None) in reply
+
+
+async def test_a_user_cannot_fake_the_food_prompt(harness, repo: FakeRepo) -> None:
+    """The prompt is matched on its text, so `InputPrompt` must also check the author is us."""
+    dp, bot, session, ai = harness
+    unused = FoodEstimate(dish="омлет", kcal=500)
+    ai.food_estimates = [unused]
+    faked = _update(i18n.FOOD_INPUT_PROMPT, message_id=900).message
+    await dp.feed_update(bot, _update("борщ", reply_to=faked))
+    assert session.sent == [] and ai.food_estimates == [unused] and repo.rows["food"] == []
 
 
 async def test_a_number_answering_the_food_prompt_is_food_not_a_weigh_in(harness, repo: FakeRepo):
