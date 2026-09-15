@@ -34,12 +34,11 @@ HELP = (
     "Що я розумію:\n"
     "- фото їжі (можна з підписом) - оціню калорії і запишу;\n"
     "- число, наприклад <code>84.3</code> - запишу як вагу;\n"
-    "- відповідь числом на моє повідомлення про їжу - виправлю оцінку;\n"
-    '- текст про спорт ("пробіг 5 км за 30 хв", "зал 1 година") - запишу активність.\n\n'
+    "- відповідь числом на моє повідомлення про їжу - виправлю оцінку.\n\n"
     "Команди (працюють і українською):\n"
     "/w 84.3 або /вага 84.3 - записати вагу\n"
-    "/food борщ і два хліба або /їжа ... - записати їжу текстом\n"
-    "/sport біг 5 км 30 хв або /спорт ... - записати активність\n"
+    "/food борщ і два хліба або /їжа ... - записати їжу текстом; без тексту - запитаю\n"
+    "/sport біг 5 км 30 хв або /спорт ... - записати активність; без тексту - запитаю\n"
     "/today або /сьогодні - мій підсумок за сьогодні\n"
     "/kcal або /калорії - що я з'їв сьогодні і скільки це ккал\n"
     "/target 2000 або /ціль 2000 - денна ціль ккал (необов'язково; /ціль стоп - прибрати)\n"
@@ -61,7 +60,12 @@ WEIGHT_WITH_DELTA = (
 )
 WEIGHT_SAME = "Записав {kg} кг. Без змін від попереднього запису ({prev_date})."
 
-FOOD_USAGE = "Опиши, що з'їв: /food борщ і два шматки хліба"
+# A bare /food or /sport asks for the text instead of erroring. The prompt is recognised later by
+# its prefix (see handlers.commands.InputPrompt), the same restart-safe trick PING_PREFIX uses.
+FOOD_INPUT_PROMPT_PREFIX = "Чекаю опис їжі."
+FOOD_INPUT_PROMPT = (
+    FOOD_INPUT_PROMPT_PREFIX + " Відповідай на це повідомлення, наприклад: борщ і два шматки хліба."
+)
 FOOD_NOT_FOOD = "Не бачу тут їжі. Якщо це все ж їжа - підпиши фото."
 CORRECTION_SAVED = "Виправив: {kcal} ккал."
 DAY_TOTAL_TODAY = "Разом за сьогодні: {kcal} ккал{target}."
@@ -72,7 +76,10 @@ CORRECTION_NOT_UNDERSTOOD = (
 )
 CORRECTED_MARK = "Виправлено за твоїм уточненням."
 
-SPORT_USAGE = "Опиши активність: /sport біг 5 км 30 хв"
+SPORT_INPUT_PROMPT_PREFIX = "Чекаю опис активності."
+SPORT_INPUT_PROMPT = (
+    SPORT_INPUT_PROMPT_PREFIX + " Відповідай на це повідомлення, наприклад: біг 5 км 30 хв."
+)
 SPORT_NOT_RECOGNIZED = 'Не розпізнав активність. Спробуй так: "біг 5 км 30 хв" або "зал 1 година".'
 SPORT_SAVED = "Записав: {activity}, {minutes} хв{distance} - близько {kcal} ккал."
 
@@ -148,15 +155,6 @@ TARGET_CLEARED = "Прибрав денну ціль. Далі просто ра
 TARGET_CURRENT = "Твоя денна ціль: {kcal} ккал. Змінити: /ціль 1800. Прибрати: /ціль стоп."
 TARGET_NONE = "Денної цілі немає. Задати: /ціль 2000."
 
-_CONFIDENCE = ((0.75, "висока"), (0.45, "середня"), (0.0, "низька"))
-
-
-def confidence_label(value: float) -> str:
-    for threshold, label in _CONFIDENCE:
-        if value >= threshold:
-            return label
-    return "низька"
-
 
 def fmt_kg(value: float) -> str:
     return f"{value:.1f}".rstrip("0").rstrip(".") if value != int(value) else f"{value:.0f}"
@@ -190,7 +188,6 @@ def food_estimate(
     fat_g: float,
     carbs_g: float,
     veg_share: float,
-    confidence: float,
     notes: str,
     corrected: bool = False,
     day_total_line: str | None = None,
@@ -207,7 +204,6 @@ def food_estimate(
     ]
     if alcohol_kcal > 0:
         lines.append(f"З них алкоголь: {alcohol_kcal:.0f} ккал.")
-    lines.append(f"Впевненість: {confidence_label(confidence)}.")
     if notes:
         lines.append(escape(notes))
     if corrected:

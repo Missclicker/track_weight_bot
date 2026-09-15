@@ -1,12 +1,17 @@
-"""Slash commands: /start /help /w /food /sport /today /kcal /target /week."""
+"""Slash commands: /start /help /w /food /sport /today /kcal /target /week.
+
+`/food` and `/sport` without an argument ask for the text and record whatever comes back as a
+reply, so the commands can be tapped from Telegram's command menu.
+"""
 
 from __future__ import annotations
 
 from html import escape
+from typing import Literal
 
-from aiogram import Router
-from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import Message
+from aiogram import Bot, Router
+from aiogram.filters import BaseFilter, Command, CommandObject, CommandStart
+from aiogram.types import ForceReply, Message
 
 from bot import i18n
 from bot.ai import GeminiClient
@@ -25,6 +30,35 @@ from bot.parsing import (
 from bot.reports import day_food, today_summary
 from bot.scheduler import Jobs, user_now
 from bot.sheets import SheetsRepo
+
+_MAX_PROMPT_TEXT = 500  # same cap as corrections._MAX_CORRECTION_TEXT
+
+_PROMPT_PREFIXES: dict[str, str] = {
+    "food": i18n.FOOD_INPUT_PROMPT_PREFIX,
+    "sport": i18n.SPORT_INPUT_PROMPT_PREFIX,
+}
+
+
+class InputPrompt(BaseFilter):
+    """A text reply to the bot's "Чекаю опис ..." prompt for `/food` or `/sport`.
+
+    The prompt is recognised by its text prefix rather than a remembered message id, so it
+    survives a restart (the same trick as `weight.is_ping_reply`). Injects `payload`.
+    """
+
+    def __init__(self, kind: Literal["food", "sport"]) -> None:
+        self.prefix = _PROMPT_PREFIXES[kind]
+
+    async def __call__(self, message: Message, bot: Bot) -> bool | dict[str, object]:
+        reply = message.reply_to_message
+        if reply is None or reply.from_user is None or reply.from_user.id != bot.id:
+            return False
+        if not (reply.text or "").startswith(self.prefix):
+            return False
+        text = (message.text or "").strip()
+        if not text:
+            return False
+        return {"payload": text[:_MAX_PROMPT_TEXT]}
 
 
 async def cmd_start(message: Message, repo: SheetsRepo, settings: Settings) -> None:
@@ -53,27 +87,50 @@ async def cmd_weight(
     await record_weight(message, kg, repo, settings, source="command")
 
 
+async def _record_food_text(
+    message: Message,
+    text: str,
+    repo: SheetsRepo,
+    ai: GeminiClient,
+    settings: Settings,
+    source: str,
+) -> None:
+    user = await ensure_user(message, repo, settings)
+    est = await ai.estimate_food(None, None, text)
+    if not est.is_food:
+        await message.reply(i18n.FOOD_NOT_FOOD)
+        return
+    await record_food(message, user, est, repo, settings, source)
+
+
 async def cmd_food(
     message: Message, command: CommandObject, repo: SheetsRepo, ai: GeminiClient, settings: Settings
 ) -> None:
     if not command.args:
-        await message.reply(i18n.FOOD_USAGE)
+        await message.reply(i18n.FOOD_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
         return
-    user = await ensure_user(message, repo, settings)
-    est = await ai.estimate_food(None, None, command.args)
-    if not est.is_food:
-        await message.reply(i18n.FOOD_NOT_FOOD)
-        return
-    await record_food(message, user, est, repo, settings, "text")
+    await _record_food_text(message, command.args, repo, ai, settings, "text")
+
+
+async def on_food_prompt_reply(
+    message: Message, payload: str, repo: SheetsRepo, ai: GeminiClient, settings: Settings
+) -> None:
+    await _record_food_text(message, payload, repo, ai, settings, "prompt")
 
 
 async def cmd_sport(
     message: Message, command: CommandObject, repo: SheetsRepo, ai: GeminiClient, settings: Settings
 ) -> None:
     if not command.args:
-        await message.reply(i18n.SPORT_USAGE)
+        await message.reply(i18n.SPORT_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
         return
     await record_sport(message, command.args, repo, ai, settings, source="command")
+
+
+async def on_sport_prompt_reply(
+    message: Message, payload: str, repo: SheetsRepo, ai: GeminiClient, settings: Settings
+) -> None:
+    await record_sport(message, payload, repo, ai, settings, source="prompt")
 
 
 async def cmd_today(message: Message, repo: SheetsRepo, settings: Settings) -> None:
@@ -146,4 +203,9 @@ def build() -> Router:
     router.message.register(cmd_kcal, Command(*aliases["kcal"]))
     router.message.register(cmd_target, Command(*aliases["target"]))
     router.message.register(cmd_week, Command(*aliases["week"]))
+    # after the commands, but still in the first router inside `guarded`: an answer to the food
+    # prompt must be read as food even when it is a bare number (which `weight` would grab) or a
+    # reply the `corrections` router would otherwise inspect.
+    router.message.register(on_food_prompt_reply, InputPrompt("food"))
+    router.message.register(on_sport_prompt_reply, InputPrompt("sport"))
     return router

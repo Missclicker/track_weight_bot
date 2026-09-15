@@ -6,7 +6,6 @@ from bot.parsing import (
     WaterSchedule,
     is_target_clear_request,
     is_water_due,
-    looks_like_sport,
     parse_correction,
     parse_kcal_target,
     parse_water_schedule,
@@ -107,67 +106,6 @@ def test_parse_correction_accepts(text: str, expected: float) -> None:
 )
 def test_parse_correction_rejects(text: str | None) -> None:
     assert parse_correction(text) is None
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "пробіг 5 км за 30 хв",
-        "Побігав 40 хвилин",
-        "ранкова пробіжка 7 км",
-        "в залі 1 година",
-        "був у залі",
-        "силове тренування 45 хв",
-        "тренувався годину",
-        "велосипед 20 км",
-        "вело 1.5 години",
-        "плавання 45 хв",
-        "поплавав у басейні",
-        "ходьба 10000 кроків",
-        "пройшов 8 км",
-        "йога 30 хв",
-        "футбол 90 хвилин",
-        "теніс 1 год",
-        "ran 5k in 25 min",
-        "gym 1h",
-        "30 min swim",
-        "cycling 40 km",
-        "yoga 1 hour",
-        "кардіо 20 хв",
-        "танці 2 години",
-    ],
-)
-def test_looks_like_sport_positive(text: str) -> None:
-    assert looks_like_sport(text)
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        None,
-        "",
-        "84.3",
-        "84,3 кг",
-        "/sport біг 5 км",  # commands go through the command handler
-        "привіт усім",
-        "залишилось два дні до вихідних",  # 'зал' must not match 'залишилось'
-        "обід був смачний",
-        "хто йде в кіно?",
-        "тобіго",
-        "скільки ккал у борщі?",
-        "x" * 301,
-        # everyday phrases that share a stem with a sport keyword
-        "плавно перейдемо до справи",
-        "похід у магазин за хлібом",
-        "гуляли по місту з дітьми",
-        "крок за кроком",
-        "skip lunch today",
-        "a great skill",
-        "my weight is 84.3",
-    ],
-)
-def test_looks_like_sport_negative(text: str | None) -> None:
-    assert not looks_like_sport(text)
 
 
 @pytest.mark.parametrize(

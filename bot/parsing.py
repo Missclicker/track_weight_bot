@@ -6,8 +6,6 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, time
 
-from bot import met
-
 # "84.3", "84,3", "84.3 кг", "84 kg", "вага 84.3", "вага: 84,3кг", "weight 84.3"
 _WEIGHT = re.compile(
     r"""^\s*
@@ -103,21 +101,6 @@ def parse_kcal_target(text: str | None) -> float | None:
 
 def is_target_clear_request(text: str | None) -> bool:
     return bool(text) and text.strip().lower().rstrip(".!") in TARGET_CLEAR_WORDS
-
-
-def looks_like_sport(text: str | None) -> bool:
-    """True when a free-text message mentions a sport keyword from the MET table.
-
-    Commands, bare numbers and very long messages are not sport.
-    """
-    if not text:
-        return False
-    stripped = text.strip()
-    if not stripped or stripped.startswith("/") or len(stripped) > 300:
-        return False
-    if re.fullmatch(r"[\d\s.,:кгkg]+", stripped, re.IGNORECASE):
-        return False
-    return met.find_activity(stripped) is not None
 
 
 # -- water reminders ----------------------------------------------------------------------------

@@ -19,7 +19,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/__main__.py` | Entry point. Loads settings (fails fast with a readable message), ensures the sheet schema, builds `Bot`/`Dispatcher`, injects dependencies, starts the scheduler and polling. |
 | `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist. |
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
-| `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `looks_like_sport`, `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
+| `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `parse_kcal_target`, `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators. |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
@@ -43,6 +43,11 @@ Inside `guarded` the routers are tried in order:
    missing, zero or not a finite number. `/food` and food photos
    share `photos.record_food`, which reads the sender's food rows for today so the `≈` reply
    ends with "Разом за сьогодні: N ккал" (the new entry included); `/kcal` lists those rows.
+   A bare `/food` or `/sport` (tapped from Telegram's command menu) answers with a `ForceReply`
+   prompt and the reply to it is recorded - the `InputPrompt` filter recognises the prompt by its
+   text prefix, so it survives a restart. Those two handlers are registered in `commands`, the
+   first router inside `guarded`, on purpose: a bare number answering the food prompt must be read
+   as food rather than grabbed by `weight`.
 2. `water` - `/вода` (`/water`, `/voda`): show, set or cancel the sender's water reminders.
 3. `corrections` - a reply to a bot message that starts with `≈` (the food-estimate prefix).
    A number -> `update_food_kcal(user_id, message_id)`. Any other text -> `get_food_entry`,
@@ -56,8 +61,10 @@ Inside `guarded` the routers are tried in order:
    reply to the morning ping (recognised by the ping text, so it survives restarts) -> `add_weight`.
 5. `photos` - any photo -> Gemini vision -> reply -> `add_food` with the *reply's* `message_id`
    so a later correction can find the row.
-6. `sport` - text matching a sport keyword -> Gemini text parse -> kcal from the MET table
-   -> `add_sport`.
+
+Sport has no router of its own: free text is never scanned for sport keywords (too many false
+positives in a chatty group), so `sport.record_sport` is reached only from `/sport` and its prompt
+reply -> Gemini text parse -> kcal from the MET table -> `add_sport`.
 
 Filters return a `dict` on match (`{"kg": 84.3, "source": "text"}`), which aiogram injects into
 the handler - so parsing happens once and unmatched messages fall through to the next router.

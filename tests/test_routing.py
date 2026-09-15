@@ -1,6 +1,7 @@
 """End-to-end routing through a real aiogram Dispatcher with a mocked Telegram session.
 
-Checks that a text message lands in the right handler (weight / correction / sport / ignored)
+Checks that a text message lands in the right handler (weight / correction / prompt reply /
+ignored)
 and that the allowed-chat gate works. Gemini and Sheets are replaced by fakes.
 """
 
@@ -222,7 +223,6 @@ async def test_text_reply_to_food_estimate_revises_via_ai(harness, repo: FakeRep
     await repo.add_food(me, FoodEstimate(dish="борщ", kcal=600), datetime.now(), "text", 777)
     food_msg = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 777)
 
-    # a sport keyword inside the reply must not divert it to the sport router
     await dp.feed_update(bot, _update("плюс два шматки хліба, потім біг", reply_to=food_msg))
     assert ai.revise_calls == [(False, "борщ", "плюс два шматки хліба, потім біг")]
     assert ai.sport_calls == []
@@ -248,20 +248,20 @@ async def test_text_reply_to_someone_elses_estimate_is_refused(harness, repo: Fa
     assert session.sent[-1]["text"] == i18n.CORRECTION_NOT_FOUND
 
 
-async def test_sport_text_goes_to_ai(harness, repo: FakeRepo) -> None:
+async def test_sport_text_is_ignored(harness, repo: FakeRepo) -> None:
+    """Free text is no longer scanned for sport keywords: only /sport records an activity."""
     dp, bot, session, ai = harness
     await dp.feed_update(bot, _update("пробіг 5 км за 30 хв"))
-    assert ai.sport_calls == ["пробіг 5 км за 30 хв"]
-    assert repo.rows["sport"][0]["kcal"] == 390
-    assert "390" in session.sent[-1]["text"]
+    assert session.sent == []
+    assert ai.sport_calls == []
+    assert repo.rows["sport"] == []
 
 
 async def test_sport_command(harness, repo: FakeRepo) -> None:
-    dp, bot, session, ai = harness
+    dp, bot, _, ai = harness
     await dp.feed_update(bot, _update("/sport зал 1 година"))
     assert ai.sport_calls == ["зал 1 година"]
-    await dp.feed_update(bot, _update("/sport", message_id=2))
-    assert session.sent[-1]["text"] == i18n.SPORT_USAGE
+    assert repo.rows["sport"][0]["source"] == "command"
 
 
 async def test_plain_chat_is_ignored(harness, repo: FakeRepo) -> None:
@@ -414,7 +414,7 @@ async def test_handler_error_is_reported_not_raised(harness, repo: FakeRepo) -> 
         raise RuntimeError("gemini down")
 
     ai.parse_sport = boom  # type: ignore[method-assign]
-    await dp.feed_update(bot, _update("біг 30 хв"))
+    await dp.feed_update(bot, _update("/sport біг 30 хв"))
     assert session.sent[-1]["text"] == i18n.ERROR_TRY_AGAIN
 
 
@@ -437,6 +437,67 @@ async def test_food_command_reports_running_day_total(
     assert second.index(i18n.day_total(1130, None)) < second.index("Щоб виправити")
     assert [r["kcal"] for r in repo.rows["food"]] == [500, 630]
     assert "Разом за сьогодні: 1130 ккал." in second
+
+
+async def test_food_reply_has_no_confidence_line_but_the_row_keeps_it(harness, repo: FakeRepo):
+    dp, bot, session, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="омлет", kcal=500, confidence=0.9)]
+    await dp.feed_update(bot, _update("/food омлет"))
+    assert "Впевненість" not in session.sent[-1]["text"]
+    assert repo.rows["food"][0]["confidence"] == 0.9
+
+
+async def test_bare_food_command_asks_for_the_text(harness, repo: FakeRepo) -> None:
+    dp, bot, session, ai = harness
+    for message_id, command in enumerate(("/food", "/їжа", "/yizha"), start=1):
+        await dp.feed_update(bot, _update(command, message_id=message_id))
+        assert session.sent[-1]["text"] == i18n.FOOD_INPUT_PROMPT
+        assert session.sent[-1]["reply_markup"]["force_reply"] is True
+    assert ai.food_estimates == []  # nothing was asked of Gemini ...
+    assert repo.rows["food"] == []  # ... and nothing was stored
+
+
+async def test_reply_to_the_food_prompt_is_recorded(harness, repo: FakeRepo) -> None:
+    dp, bot, session, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="борщ", kcal=500)]
+    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    await dp.feed_update(bot, _update("борщ і два шматки хліба", reply_to=prompt))
+
+    row = repo.rows["food"][0]
+    assert (row["dish"], row["kcal"], row["source"]) == ("борщ", 500, "prompt")
+    assert row["user_id"] == ME
+    reply = session.sent[-1]["text"]
+    assert reply.startswith(i18n.FOOD_PREFIX + " 500")
+    assert i18n.day_total(500, None) in reply
+
+
+async def test_a_number_answering_the_food_prompt_is_food_not_a_weigh_in(harness, repo: FakeRepo):
+    """`commands` is the first router inside `guarded`, so it wins over `weight`."""
+    dp, bot, _, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="сто грам сиру", kcal=250)]
+    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    await dp.feed_update(bot, _update("100", reply_to=prompt))
+    assert repo.rows["weight"] == []
+    assert repo.rows["food"][0]["source"] == "prompt"
+
+
+async def test_bare_sport_command_asks_for_the_text(harness, repo: FakeRepo) -> None:
+    dp, bot, session, ai = harness
+    await dp.feed_update(bot, _update("/sport"))
+    assert session.sent[-1]["text"] == i18n.SPORT_INPUT_PROMPT
+    assert session.sent[-1]["reply_markup"]["force_reply"] is True
+    assert ai.sport_calls == []
+    assert repo.rows["sport"] == []
+
+
+async def test_reply_to_the_sport_prompt_is_recorded(harness, repo: FakeRepo) -> None:
+    dp, bot, session, ai = harness
+    prompt = _bot_message(i18n.SPORT_INPUT_PROMPT, 1001)
+    await dp.feed_update(bot, _update("біг 5 км 30 хв", reply_to=prompt))
+    assert ai.sport_calls == ["біг 5 км 30 хв"]
+    row = repo.rows["sport"][0]
+    assert (row["kcal"], row["source"], row["user_id"]) == (390, "prompt", ME)
+    assert "390" in session.sent[-1]["text"]
 
 
 async def test_kcal_command_lists_today(harness, repo: FakeRepo, settings: Settings) -> None:

@@ -66,13 +66,12 @@ def test_food_estimate_reply_text_starts_with_prefix_and_escapes() -> None:
         est.fat_g,
         est.carbs_g,
         est.veg_share,
-        est.confidence,
         est.notes,
     )
     assert text.startswith(i18n.FOOD_PREFIX)
     assert "&lt;Цезар&gt;" in text
     assert "алкоголь: 120" in text
-    assert "середня" in text  # confidence 0.7
+    assert "Впевненість" not in text  # the model's confidence is stored, never shown
 
 
 def test_sport_parse_schema() -> None:

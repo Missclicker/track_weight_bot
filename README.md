@@ -5,7 +5,7 @@ A small Telegram bot for a friend group that wants to lose weight together. It l
 1. **Counts calories from food photos** (Gemini vision, free tier) and logs them to a Google Sheet — with a separate alcohol counter.
 2. **Records weight** when someone posts a number like `84.3` (or replies to the morning ping).
 3. **Pings everyone who hasn't weighed in by 11:00.**
-4. **Logs sport** from free text ("пробіг 5 км за 30 хв") as negative calories.
+4. **Logs sport** from `/sport пробіг 5 км за 30 хв` as negative calories.
 5. **Posts a weekly AI report** every Monday morning about the week that just ended — intake, sport, weight trend, and recommendations (kcal target, veg/protein ratio). In a one-to-one chat the text is written for you alone; that personal report is skipped if you already get one in a group.
 6. **Reminds you to drink water** in a private message, on a schedule you pick yourself (`/вода будні з 9 до 18 кожні 30 хвилин`).
 
@@ -37,9 +37,9 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    start - Зареєструватися і показати довідку
    w - Записати вагу: /w 84.3
    vaga - Те саме, що /w
-   food - Записати їжу текстом: /food борщ і два хліба
+   food - Записати їжу текстом: /food борщ і два хліба (без тексту - запитаю)
    yizha - Те саме, що /food
-   sport - Записати активність: /sport біг 5 км 30 хв
+   sport - Записати активність: /sport біг 5 км 30 хв (без тексту - запитаю)
    today - Мій підсумок за сьогодні
    sohodni - Те саме, що /today
    kcal - Що я з'їв сьогодні і скільки це ккал
@@ -263,8 +263,13 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | reply to the bot's food estimate with text (weight, ingredients, dish name)                                        | Gemini re-estimates it (with the photo) and updates the row |
 | `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                     |
 | `/water …` / `/вода …` (in the group or in the DM)                                                                 | water reminder schedule → `water`                           |
-| text mentioning sport keywords (біг, зал, велосипед, плавання, …) or `/sport`                                      | Gemini text parse → `sport`                                 |
+| `/sport біг 5 км 30 хв` (`/спорт …`)                                                                               | Gemini text parse → `sport`                                 |
+| `/food` or `/sport` with no text                                                                                   | the bot asks for it ("Чекаю опис …") and waits for a reply  |
+| reply to that prompt                                                                                               | recorded as food / sport for whoever replied                |
 | anything else                                                                                                      | ignored                                                     |
+
+Plain chat messages are never scanned for sport keywords — mentioning a run in conversation used to
+log a workout by mistake, so an activity is only recorded through `/sport` or a reply to its prompt.
 
 You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target` and `active` there can be edited by hand and are preserved; `daily_kcal_target` is also set from the chat with `/target 2000` (`/ціль 2000`) and cleared with `/target стоп`. It is optional: without it the bot just counts, with it every food reply, `/kcal` and `/today` show `(ціль N)`.
 

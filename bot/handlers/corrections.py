@@ -114,7 +114,6 @@ async def on_text_correction(
             est.fat_g,
             est.carbs_g,
             est.veg_share,
-            est.confidence,
             est.notes,
             corrected=True,
             day_total_line=total_line,
