@@ -56,6 +56,14 @@ def test_food_estimate_portion_is_stripped_and_capped() -> None:
     assert FoodEstimate.model_validate({**SAMPLE, "portion": None}).portion == ""
 
 
+def test_food_estimate_portion_is_flattened_to_one_line() -> None:
+    """The cap is about keeping the `≈` line one line, so a short multi-line answer counts too."""
+    est = FoodEstimate.model_validate({**SAMPLE, "portion": " 400 г\nабо 2 порції  "})
+    assert est.portion == "400 г або 2 порції"
+    # the whole portion stays on the first line of the reply instead of splitting it in two
+    assert _reply(est).splitlines()[0].endswith(", 400 г або 2 порції")
+
+
 def test_food_estimate_requires_dish_and_kcal() -> None:
     with pytest.raises(ValidationError):
         FoodEstimate.model_validate({"dish": "щось"})

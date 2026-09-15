@@ -326,6 +326,13 @@ class SheetsRepo:
         self._worksheets: dict[str, gspread.Worksheet] = {}
         self._users_cache: tuple[float, list[User]] | None = None
         self.service_account_email: str | None = None
+        # Serialises the find-then-delete pairs below: a row number is only valid until somebody
+        # removes an earlier row, and aiogram handles every update in its own task (so two deletes
+        # run in two `asyncio.to_thread` workers). A plain in-process lock is enough because the
+        # bot is a single polling instance by design ("Long polling, not webhooks" in
+        # docs/ARCHITECTURE.md). It cannot cover a human editing the spreadsheet at the same
+        # moment - that is what the re-read in `_delete_confirmed_row_sync` is for.
+        self._delete_lock = asyncio.Lock()
 
     # -- connection -------------------------------------------------------------------------
 
@@ -695,12 +702,42 @@ class SheetsRepo:
 
     # -- deletions --------------------------------------------------------------------------
 
+    def _delete_confirmed_row_sync(
+        self, tab: str, row_no: int, user_id: int, message_id: int
+    ) -> bool:
+        """Delete row `row_no` of `tab`, but only if it is still the row that was looked up.
+
+        A find and a delete are two API calls and cannot be made atomic, so the row is re-read
+        immediately before it is removed: if anything shifted the rows in between (a hand edit of
+        the spreadsheet, which `_delete_lock` cannot see) the delete is abandoned rather than
+        aimed at whatever slid into that position.
+
+        The delete itself is deliberately *not* wrapped in `with_retry`. Every other write in this
+        file is a cell update or an append and is safe to repeat; removing a row is not, and a
+        retry after a lost 5xx response - where the server did commit - would take out the next
+        row. A failing confirmation read propagates for the same reason: failing safe here means
+        not deleting.
+        """
+        current = with_retry(self._ws(tab).row_values, row_no)
+        col_uid = HEADERS[tab].index("user_id")
+        col_msg = HEADERS[tab].index("message_id")
+        if (
+            len(current) <= col_msg
+            or current[col_uid] != str(user_id)
+            or current[col_msg] != str(message_id)
+        ):
+            log.warning("%s row %d moved before the delete; nothing removed", tab, row_no)
+            return False
+        self._ws(tab).delete_rows(row_no)
+        return True
+
     def _delete_food_row_sync(self, user_id: int, message_id: int) -> dict[str, str] | None:
         found = self._find_food_row_sync(user_id, message_id)
         if found is None:
             return None
         row_no, row = found
-        with_retry(self._ws("food").delete_rows, row_no)
+        if not self._delete_confirmed_row_sync("food", row_no, user_id, message_id):
+            return None
         return row
 
     async def delete_food_entry(self, user_id: int, message_id: int) -> dict[str, Any] | None:
@@ -711,19 +748,20 @@ class SheetsRepo:
         having to learn about the flag. The row is returned so the caller can recompute the day
         total for the date it belonged to without a second scan of the tab.
         """
-        row = await self._run(self._delete_food_row_sync, user_id, message_id)
+        async with self._delete_lock:  # the row number must stay valid until the delete lands
+            row = await self._run(self._delete_food_row_sync, user_id, message_id)
         return None if row is None else _food_entry(row)
 
     def _delete_sport_row_sync(self, user_id: int, message_id: int) -> bool:
         row_no = self._find_sport_row_sync(user_id, message_id)
         if row_no is None:
             return False
-        with_retry(self._ws("sport").delete_rows, row_no)
-        return True
+        return self._delete_confirmed_row_sync("sport", row_no, user_id, message_id)
 
     async def delete_sport_entry(self, user_id: int, message_id: int) -> bool:
         """Drop the sport row announced in `message_id`; False if it is not the sender's."""
-        return await self._run(self._delete_sport_row_sync, user_id, message_id)
+        async with self._delete_lock:
+            return await self._run(self._delete_sport_row_sync, user_id, message_id)
 
     # -- queries ----------------------------------------------------------------------------
 

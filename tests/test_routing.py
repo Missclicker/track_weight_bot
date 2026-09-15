@@ -636,6 +636,20 @@ async def test_reply_videly_deletes_the_sport_row(harness, repo: FakeRepo) -> No
     assert session.sent[-1]["text"] == i18n.SPORT_NOT_FOUND_FOR_DELETE
 
 
+async def test_a_non_delete_reply_to_a_sport_confirmation_is_ignored(harness, repo: FakeRepo):
+    """The sport router deletes and nothing else: re-estimating an activity is out of scope, and
+    a reply must not become a second workout the way free text used to."""
+    dp, bot, session, ai = harness
+    await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
+    sport_msg = _bot_message(session.sent[-1]["text"], 1001)
+    sent_before, rows_before = len(session.sent), len(repo.rows["sport"])
+
+    await dp.feed_update(bot, _update("біг 10 км", reply_to=sport_msg, message_id=2))
+    assert len(session.sent) == sent_before  # no reply at all
+    assert len(repo.rows["sport"]) == rows_before  # and no second row
+    assert ai.sport_calls == ["біг 5 км 30 хв"]  # Gemini saw only the command
+
+
 async def test_the_food_estimate_shows_the_portion(harness, repo: FakeRepo) -> None:
     dp, bot, session, ai = harness
     ai.food_estimates = [FoodEstimate(dish="омлет", kcal=500, portion="250 г")]

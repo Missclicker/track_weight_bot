@@ -195,7 +195,7 @@ def food_estimate(
     carbs_g: float,
     veg_share: float,
     notes: str,
-    portion: str = "",
+    portion: str,
     corrected: bool = False,
     day_total_line: str | None = None,
 ) -> str:

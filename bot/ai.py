@@ -83,9 +83,12 @@ class FoodEstimate(BaseModel):
     @classmethod
     def _strip(cls, value: Any, info: Any) -> str:
         text = str(value or "").strip()
-        # `portion` is appended to the one-line "≈ ..." reply, so it is capped here rather than
-        # trusted: a chatty model must not be able to turn that line into a paragraph.
-        return text[:_MAX_PORTION_CHARS] if info.field_name == "portion" else text
+        if info.field_name != "portion":
+            return text
+        # `portion` is appended to the one-line "≈ ..." reply, so it is flattened and capped here
+        # rather than trusted: neither an embedded newline nor a chatty answer may turn that one
+        # line into a paragraph. Stripping the ends alone would let "400 г\nабо 2 порції" through.
+        return " ".join(text.split())[:_MAX_PORTION_CHARS]
 
 
 class SportParse(BaseModel):

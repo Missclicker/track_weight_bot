@@ -44,6 +44,10 @@ class FakeWorksheet:
         row_no = int("".join(ch for ch in range_name if ch.isdigit()))
         self.rows[row_no - 1] = [str(v) for v in values[0]]
 
+    def row_values(self, row_no: int) -> list[str]:
+        # past the last row gspread answers with an empty list rather than raising
+        return list(self.rows[row_no - 1]) if row_no <= len(self.rows) else []
+
     def delete_rows(self, row_no: int) -> None:
         del self.rows[row_no - 1]
 
@@ -261,6 +265,31 @@ async def test_delete_food_entry_removes_the_row_and_returns_it(repo: SheetsRepo
     assert await repo.get_food_entry(1, 42) is None
     assert await repo.get_food_entry(2, 42) is not None
     assert await repo.delete_food_entry(1, 42) is None  # already gone
+
+
+async def test_delete_abandons_a_row_that_moved_since_the_find(repo: SheetsRepo, monkeypatch):
+    """A row number goes stale the moment an earlier row disappears (a hand edit, a lost retry).
+
+    The delete must then remove nothing at all rather than whatever slid into that position.
+    """
+    now = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+    people = [User(user_id=i, chat_id=-100 * i, name=f"U{i}") for i in (2, 1, 3)]
+    for person in people:  # the same message_id in three different chats
+        await repo.add_food(person, FoodEstimate(dish=person.name, kcal=600), now, "photo", 42)
+    found = repo._find_food_row_sync(1, 42)
+    assert found is not None and found[0] == 3
+
+    # ... and now U2's row above it goes away, so U3's row is the one sitting at row 3
+    ws(repo, "food").rows.pop(1)
+    monkeypatch.setattr(repo, "_find_food_row_sync", lambda *args: found)
+
+    assert await repo.delete_food_entry(1, 42) is None
+    names = [r[HEADERS["food"].index("name")] for r in ws(repo, "food").rows[1:]]
+    assert names == ["U1", "U3"]  # nothing was removed, U3 in particular survived
+
+    # the same guard when the stale row number now points past the end of the tab
+    monkeypatch.setattr(repo, "_find_sport_row_sync", lambda *args: 99)
+    assert await repo.delete_sport_entry(1, 42) is False
 
 
 async def test_delete_sport_entry_is_scoped_to_owner(repo: SheetsRepo):
