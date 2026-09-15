@@ -54,8 +54,9 @@ HELP = (
 START_REGISTERED = "Записав тебе, {name}. Щоранку до {deadline} чекаю на вагу.\n\n" + HELP
 
 ERROR_TRY_AGAIN = "Не вийшло, спробуй ще раз."
-# Sent once mid-call, when a Gemini attempt ran out of time and a longer one is starting.
-AI_RETRYING = "AI не відповів вчасно, пробую ще раз."
+# Sent once mid-call, when a Gemini attempt failed and a longer one is starting. Deliberately
+# says nothing about *why*: the same notice covers a deadline, a 429 and a dropped connection.
+AI_RETRYING = "AI не відповів, пробую ще раз."
 
 WEIGHT_USAGE = "Напиши вагу так: /w 84.3"
 WEIGHT_OUT_OF_RANGE = "Це не схоже на вагу. Очікую число від {lo:g} до {hi:g} кг."

@@ -228,12 +228,12 @@ class GeminiClient:
     """Thin async wrapper around `google.genai.Client`."""
 
     def __init__(self, api_key: str, vision_model: str, text_model: str) -> None:
-        # Only a floor for calls that do not carry their own `http_options`: `_generate` overrides
-        # this per attempt, and the client-level value must not pin every attempt to the shortest
-        # deadline.
+        # `_generate` overrides this per attempt, so this value only reaches a call that carries
+        # no `http_options` of its own. Keep it at the shortest deadline: such a call gets no
+        # retry, and hanging on it for the *longest* deadline would be the wrong default.
         self._client = genai.Client(
             api_key=api_key,
-            http_options=types.HttpOptions(timeout=int(_ATTEMPT_TIMEOUTS_S[-1] * 1000)),
+            http_options=types.HttpOptions(timeout=int(_ATTEMPT_TIMEOUTS_S[0] * 1000)),
         )
         self._vision_model = vision_model
         self._text_model = text_model
@@ -275,8 +275,8 @@ class GeminiClient:
                 log.warning("Gemini %s failed (attempt %d): %s", model, attempt + 1, exc)
                 if isinstance(exc, genai_errors.APIError) and exc.code not in _TRANSIENT_CODES:
                     break  # 400/403/404: bad key or retired model - retrying won't help
-                if attempt >= len(_RETRY_DELAYS_S):
-                    break
+                if attempt >= min(len(_RETRY_DELAYS_S), len(_ATTEMPT_TIMEOUTS_S) - 1):
+                    break  # last attempt: never sleep on the way out
                 if on_retry is not None and not notified:
                     notified = True  # set first: one notice per public call, even if it fails
                     try:

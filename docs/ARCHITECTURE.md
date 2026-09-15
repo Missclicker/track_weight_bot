@@ -131,7 +131,8 @@ The four public methods take an optional `on_retry` callback that fires *once* p
 before the first backoff sleep. The interactive call sites (`photos.on_photo`,
 `commands._record_food_text`, `corrections.on_text_correction`, `sport.record_sport`) pass
 `partial(message.reply, i18n.AI_RETRYING)`, so somebody waiting on a slow estimate is told the
-answer is late instead of staring at silence; the notice is left in the chat. A send that fails is
+answer is late instead of staring at silence; the notice is left in the chat. Its wording names no
+cause, because the same notice covers a deadline, a 429 and a dropped connection. A send that fails is
 logged and the retry continues. `scheduler.run_weekly_report` passes no callback: nobody waits on
 a background job and it already degrades to the numbers-only fallback.
 

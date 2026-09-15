@@ -1,84 +1,25 @@
 """`GeminiClient._generate`: three attempts, escalating server deadlines, retry notice.
 
-The SDK call is replaced by `FakeModels`, so nothing goes over the network; the backoff sleeps
-are zeroed with a monkeypatched `_RETRY_DELAYS_S` so the suite stays fast.
+The SDK call is replaced by `conftest.FakeModels`, so nothing goes over the network; the backoff
+sleeps are zeroed by the `no_ai_backoff` fixture so the suite stays fast.
 """
 
 from __future__ import annotations
 
-import functools
+import asyncio
 from typing import Any
 
-import aiohttp
 import pytest
 from google.genai import errors as genai_errors
 
 from bot import ai
+from tests.conftest import client_error, client_with, server_error
 
+# `bot.ai` guards both imports because they arrive transitively; the tests must agree that they
+# are optional rather than failing collection when one is absent.
+aiohttp = pytest.importorskip("aiohttp")
 
-class FakeResponse:
-    def __init__(self, text: str | None) -> None:
-        self.text = text
-
-
-class FakeModels:
-    """Answers `generate_content` from a scripted list and records the deadline of every call.
-
-    A list item is either an exception (raised) or a string (returned as the response text).
-    """
-
-    def __init__(self, outcomes: list[Any]) -> None:
-        self.outcomes = outcomes
-        self.timeouts: list[int | None] = []
-
-    async def generate_content(self, *, model: str, contents: Any, config: Any) -> FakeResponse:
-        http_options = config.http_options
-        self.timeouts.append(None if http_options is None else http_options.timeout)
-        outcome = self.outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return FakeResponse(outcome)
-
-    @property
-    def calls(self) -> int:
-        return len(self.timeouts)
-
-
-class _Aio:
-    def __init__(self, models: FakeModels) -> None:
-        self.models = models
-
-
-class _Client:
-    def __init__(self, models: FakeModels) -> None:
-        self.aio = _Aio(models)
-
-
-@pytest.fixture(autouse=True)
-def _no_backoff(monkeypatch) -> None:
-    monkeypatch.setattr(ai, "_RETRY_DELAYS_S", (0.0, 0.0))
-
-
-@functools.cache
-def _gemini() -> ai.GeminiClient:
-    # Building a real `genai.Client` costs ~1 s, and the only state `_generate` touches is the SDK
-    # object swapped out below - so one instance serves the whole module.
-    return ai.GeminiClient("test-key", "vision-model", "text-model")
-
-
-def client_with(outcomes: list[Any]) -> tuple[ai.GeminiClient, FakeModels]:
-    client = _gemini()
-    models = FakeModels(outcomes)
-    client._client = _Client(models)  # type: ignore[assignment]
-    return client, models
-
-
-def server_error(code: int = 504) -> genai_errors.APIError:
-    return genai_errors.ServerError(code, {"error": {"status": "DEADLINE_EXCEEDED"}})
-
-
-def client_error(code: int) -> genai_errors.APIError:
-    return genai_errors.ClientError(code, {"error": {"status": "INVALID_ARGUMENT"}})
+pytestmark = pytest.mark.usefixtures("no_ai_backoff")
 
 
 async def test_retries_after_a_504_and_returns_the_second_answer() -> None:
@@ -95,10 +36,24 @@ async def test_deadlines_escalate_per_attempt() -> None:
     assert models.timeouts == [45_000, 75_000, 120_000]
 
 
-def test_outer_wait_has_a_grace_margin_over_every_deadline() -> None:
-    # the SDK's own error must surface before the outer `asyncio.wait_for` fires
-    assert ai._TIMEOUT_GRACE_S > 0
-    assert all(deadline + ai._TIMEOUT_GRACE_S > deadline for deadline in ai._ATTEMPT_TIMEOUTS_S)
+async def test_outer_wait_has_a_grace_margin_over_every_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer `wait_for` must lose the race, or it masks the server's informative 504."""
+    waits: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def spy(aw: Any, timeout: float) -> Any:
+        waits.append(timeout)
+        return await real_wait_for(aw, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", spy)
+    client, models = client_with([server_error(), server_error(), server_error()])
+    with pytest.raises(genai_errors.APIError):
+        await client._generate("m", ["hi"], None)
+    assert waits == [50.0, 80.0, 125.0]
+    # every outer wait is strictly longer than the deadline the SDK itself was given
+    assert waits == [t / 1000 + ai._TIMEOUT_GRACE_S for t in models.timeouts]
 
 
 async def test_three_transient_failures_raise_the_last_one() -> None:
@@ -138,7 +93,7 @@ async def test_an_aiohttp_transport_error_is_retried() -> None:
 
 
 async def test_an_httpx_transport_error_is_retried() -> None:
-    import httpx
+    httpx = pytest.importorskip("httpx")
 
     client, models = client_with([httpx.ConnectError("no route"), "ok"])
     assert await client._generate("m", ["hi"], None) == "ok"

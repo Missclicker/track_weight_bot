@@ -21,15 +21,13 @@ from aiogram.methods.base import TelegramType
 from aiogram.types import Chat, Message, Update
 from aiogram.types import User as TgUser
 
-from bot import ai as ai_module
 from bot import i18n
 from bot.ai import FoodEstimate, RetryNotice, SportEntry
 from bot.config import Settings
 from bot.handlers import build_router
 from bot.scheduler import user_now
 from bot.sheets import User
-from tests.conftest import FakeRepo
-from tests.test_ai_retry import client_with, server_error
+from tests.conftest import FakeRepo, client_with, server_error
 
 BOT_ID = 123  # derived from the token "123:abc"
 CHAT_ID = -100
@@ -434,11 +432,10 @@ async def test_handler_error_is_reported_not_raised(harness, repo: FakeRepo) -> 
 
 
 async def test_food_estimate_warns_the_user_before_retrying(
-    harness, repo: FakeRepo, monkeypatch
+    harness, repo: FakeRepo, no_ai_backoff
 ) -> None:
     """A real `GeminiClient` (with the SDK call scripted) proves the notice reaches the chat."""
     dp, bot, session, _ = harness
-    monkeypatch.setattr(ai_module, "_RETRY_DELAYS_S", (0.0, 0.0))
     gemini, models = client_with([server_error(), '{"dish": "омлет", "kcal": 500}'])
     dp.workflow_data["ai"] = gemini
 

@@ -1,12 +1,17 @@
-"""Shared test fixtures: an in-memory repository with the same interface as `SheetsRepo`."""
+"""Shared test fixtures: an in-memory repository with the same interface as `SheetsRepo`,
+and a scripted stand-in for the Gemini SDK call.
+"""
 
 from __future__ import annotations
 
+import functools
 from datetime import date, datetime
 from typing import Any
 
 import pytest
+from google.genai import errors as genai_errors
 
+from bot import ai
 from bot.ai import FoodEstimate
 from bot.config import Settings
 from bot.sheets import HEADERS, User, WaterSubscription
@@ -223,6 +228,73 @@ class FakeRepo:
             return None
         last = max(mine, key=lambda r: str(r["ts"]))
         return date.fromisoformat(last["date"]), float(last["kg"])
+
+
+class FakeResponse:
+    def __init__(self, text: str | None) -> None:
+        self.text = text
+
+
+class FakeModels:
+    """Answers `generate_content` from a scripted list and records the deadline of every call.
+
+    A list item is either an exception (raised) or a string (returned as the response text).
+    """
+
+    def __init__(self, outcomes: list[Any]) -> None:
+        self.outcomes = outcomes
+        self.timeouts: list[int | None] = []
+
+    async def generate_content(self, *, model: str, contents: Any, config: Any) -> FakeResponse:
+        http_options = config.http_options
+        self.timeouts.append(None if http_options is None else http_options.timeout)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return FakeResponse(outcome)
+
+    @property
+    def calls(self) -> int:
+        return len(self.timeouts)
+
+
+class _Aio:
+    def __init__(self, models: FakeModels) -> None:
+        self.models = models
+
+
+class _Client:
+    def __init__(self, models: FakeModels) -> None:
+        self.aio = _Aio(models)
+
+
+@functools.cache
+def _gemini() -> ai.GeminiClient:
+    # Building a real `genai.Client` costs ~1 s, and the only state `_generate` touches is the SDK
+    # object swapped out below - so one instance serves the whole suite.
+    return ai.GeminiClient("test-key", "vision-model", "text-model")
+
+
+def client_with(outcomes: list[Any]) -> tuple[ai.GeminiClient, FakeModels]:
+    """A `GeminiClient` whose SDK call answers `outcomes` in order, plus the recorder."""
+    client = _gemini()
+    models = FakeModels(outcomes)
+    client._client = _Client(models)  # type: ignore[assignment]
+    return client, models
+
+
+def server_error(code: int = 504) -> genai_errors.APIError:
+    return genai_errors.ServerError(code, {"error": {"status": "DEADLINE_EXCEEDED"}})
+
+
+def client_error(code: int) -> genai_errors.APIError:
+    return genai_errors.ClientError(code, {"error": {"status": "INVALID_ARGUMENT"}})
+
+
+@pytest.fixture
+def no_ai_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero the Gemini backoff sleeps so a retry test costs nothing."""
+    monkeypatch.setattr(ai, "_RETRY_DELAYS_S", (0.0, 0.0))
 
 
 @pytest.fixture
