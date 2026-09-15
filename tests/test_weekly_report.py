@@ -42,10 +42,14 @@ class FakeAI:
 
     def __init__(self, fail: bool = False) -> None:
         self.calls: list[tuple[dict[str, Any], bool]] = []
+        self.notices: list[Any] = []
         self.fail = fail
 
-    async def weekly_report(self, payload: dict[str, Any], personal: bool = False) -> str:
+    async def weekly_report(
+        self, payload: dict[str, Any], personal: bool = False, on_retry: Any = None
+    ) -> str:
         self.calls.append((payload, personal))
+        self.notices.append(on_retry)
         if self.fail:
             raise RuntimeError("gemini is having a bad day")
         return "порада від AI"
@@ -132,6 +136,18 @@ async def test_a_group_report_is_not_personal(repo: FakeRepo, user: User) -> Non
     await jobs.run_weekly_report(GROUP, today=MONDAY)
 
     assert ai.calls[0][1] is False
+
+
+async def test_the_background_job_never_sends_a_retry_notice(repo: FakeRepo, user: User) -> None:
+    """Nobody waits on the weekly job, and a failure already falls back to the numbers."""
+    await repo.upsert_user(user)
+    await repo.add_food(user, _food(1800), _dt(date(2026, 9, 9)), "text", 1)
+
+    ai = FakeAI()
+    jobs, _ = _jobs(repo, _settings(str(GROUP)), ai)
+    await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert ai.notices == [None]
 
 
 async def test_no_personal_report_for_a_member_of_a_group(repo: FakeRepo, user: User) -> None:

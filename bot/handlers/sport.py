@@ -8,6 +8,8 @@ confirmation throws the activity away.
 
 from __future__ import annotations
 
+from functools import partial
+
 from aiogram import Bot, Router
 from aiogram.filters import BaseFilter
 from aiogram.types import Message
@@ -28,7 +30,9 @@ async def record_sport(
     user = await ensure_user(message, repo, settings)
     now = user_now(user, settings)
     previous = await repo.last_weight(user.user_id, now)
-    entry = await ai.parse_sport(text, previous[1] if previous else None)
+    entry = await ai.parse_sport(
+        text, previous[1] if previous else None, on_retry=partial(message.reply, i18n.AI_RETRYING)
+    )
     if entry is None:
         await message.reply(i18n.SPORT_NOT_RECOGNIZED)
         return

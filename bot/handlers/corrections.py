@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from functools import partial
 from io import BytesIO
 from typing import Literal
 
@@ -116,7 +117,13 @@ async def on_text_correction(
         await message.reply(i18n.CORRECTION_NOT_FOUND)
         return
     image = await _download_photo(bot, entry.get("photo_file_id") or "")
-    est = await ai.revise_food(image, "image/jpeg", entry, correction_text)
+    est = await ai.revise_food(
+        image,
+        "image/jpeg",
+        entry,
+        correction_text,
+        on_retry=partial(message.reply, i18n.AI_RETRYING),
+    )
     if not est.is_food:
         await message.reply(i18n.CORRECTION_NOT_UNDERSTOOD)
         return

@@ -6,6 +6,7 @@ reply, so the commands can be tapped from Telegram's command menu.
 
 from __future__ import annotations
 
+from functools import partial
 from html import escape
 from typing import Literal
 
@@ -110,7 +111,9 @@ async def _record_food_text(
     source: str,
 ) -> None:
     user = await ensure_user(message, repo, settings)
-    est = await ai.estimate_food(None, None, text)
+    est = await ai.estimate_food(
+        None, None, text, on_retry=partial(message.reply, i18n.AI_RETRYING)
+    )
     if not est.is_food:
         await message.reply(i18n.FOOD_NOT_FOOD)
         return

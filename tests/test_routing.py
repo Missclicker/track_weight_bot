@@ -22,12 +22,12 @@ from aiogram.types import Chat, Message, Update
 from aiogram.types import User as TgUser
 
 from bot import i18n
-from bot.ai import FoodEstimate, SportEntry
+from bot.ai import FoodEstimate, RetryNotice, SportEntry
 from bot.config import Settings
 from bot.handlers import build_router
 from bot.scheduler import user_now
 from bot.sheets import User
-from tests.conftest import FakeRepo
+from tests.conftest import FakeRepo, client_with, server_error
 
 BOT_ID = 123  # derived from the token "123:abc"
 CHAT_ID = -100
@@ -91,18 +91,32 @@ class FakeAI:
         self.revise_calls: list[tuple[bool, str, str]] = []
         self.food_estimates: list[FoodEstimate] = []  # answers for estimate_food, in order
 
+    # `on_retry` is never invoked here - the retry loop itself is covered by `test_ai_retry.py`
+    # and, end to end, by `test_food_estimate_warns_the_user_before_retrying` below. These fakes
+    # only have to accept the keyword the handlers now pass.
     async def estimate_food(
-        self, image_bytes: bytes | None, mime: str | None, caption: str | None
+        self,
+        image_bytes: bytes | None,
+        mime: str | None,
+        caption: str | None,
+        on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
         return self.food_estimates.pop(0)
 
     async def revise_food(
-        self, image: bytes | None, mime: str | None, previous: dict[str, Any], correction: str
+        self,
+        image: bytes | None,
+        mime: str | None,
+        previous: dict[str, Any],
+        correction: str,
+        on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
         self.revise_calls.append((image is not None, str(previous["dish"]), correction))
         return FoodEstimate(dish="борщ з хлібом", kcal=720, carbs_g=60)
 
-    async def parse_sport(self, text: str, weight_kg: float | None) -> SportEntry | None:
+    async def parse_sport(
+        self, text: str, weight_kg: float | None, on_retry: RetryNotice | None = None
+    ) -> SportEntry | None:
         self.sport_calls.append(text)
         return SportEntry(activity="running", title="біг", minutes=30, distance_km=5, kcal=390)
 
@@ -415,6 +429,24 @@ async def test_handler_error_is_reported_not_raised(harness, repo: FakeRepo) -> 
     ai.parse_sport = boom  # type: ignore[method-assign]
     await dp.feed_update(bot, _update("/sport біг 30 хв"))
     assert session.sent[-1]["text"] == i18n.ERROR_TRY_AGAIN
+
+
+async def test_food_estimate_warns_the_user_before_retrying(
+    harness, repo: FakeRepo, no_ai_backoff
+) -> None:
+    """A real `GeminiClient` (with the SDK call scripted) proves the notice reaches the chat."""
+    dp, bot, session, _ = harness
+    gemini, models = client_with([server_error(), '{"dish": "омлет", "kcal": 500}'])
+    dp.workflow_data["ai"] = gemini
+
+    await dp.feed_update(bot, _update("/food омлет"))
+
+    assert models.calls == 2
+    texts = [m["text"] for m in session.sent]
+    assert texts[0] == i18n.AI_RETRYING  # said once, before the estimate itself
+    assert texts.count(i18n.AI_RETRYING) == 1
+    assert texts[-1].startswith(i18n.FOOD_PREFIX + " 500")
+    assert repo.rows["food"][0]["kcal"] == 500
 
 
 async def test_food_command_reports_running_day_total(

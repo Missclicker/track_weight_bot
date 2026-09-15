@@ -6,6 +6,7 @@ the reply and appends the row.
 
 from __future__ import annotations
 
+from functools import partial
 from io import BytesIO
 
 from aiogram import Bot, F, Router
@@ -58,7 +59,13 @@ async def on_photo(
     buffer = BytesIO()
     await bot.download(largest, destination=buffer)
     user = await ensure_user(message, repo, settings)
-    est = await ai.estimate_food(buffer.getvalue(), "image/jpeg", message.caption)
+    # a photo estimate can take a couple of minutes on a busy hour; say so once if we have to retry
+    est = await ai.estimate_food(
+        buffer.getvalue(),
+        "image/jpeg",
+        message.caption,
+        on_retry=partial(message.reply, i18n.AI_RETRYING),
+    )
     if not est.is_food:
         await message.reply(i18n.FOOD_NOT_FOOD)
         return

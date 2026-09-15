@@ -221,6 +221,8 @@ class Jobs:
             text = f"{header}\n{i18n.WEEKLY_NO_DATA}"
         else:
             try:
+                # deliberately no `on_retry` notice: this is a background job, nobody is waiting
+                # on it, and a failure already degrades to the numbers-only fallback below
                 body = await self.ai.weekly_report(payload, personal=is_personal_chat(chat_id))
                 text = f"{header}\n\n{body}"
             except Exception:
