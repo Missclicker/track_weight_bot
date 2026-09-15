@@ -103,9 +103,11 @@ def is_target_clear_request(text: str | None) -> bool:
     return bool(text) and text.strip().lower().rstrip(".!") in TARGET_CLEAR_WORDS
 
 
-# A reply of one of these words to a bot record ("видали") throws that record away. The whole
-# message must be the word: "без хліба" or "це 300 г" are corrections, not deletions, and a
-# substring match would eat them.
+# A reply asking for a record to be thrown away: a verb from `DELETE_WORDS`, optionally padded
+# with words that carry no information ("видали цей запис", "delete this please"). Anything else
+# in the message disqualifies it, because a stray noun changes the meaning entirely: "прибери
+# хліб" asks to drop the bread from the estimate, not to drop the record, and must still reach
+# Gemini as a correction.
 DELETE_WORDS = frozenset(
     {
         "видали",
@@ -113,25 +115,62 @@ DELETE_WORDS = frozenset(
         "видаліть",
         "прибери",
         "прибрати",
+        "заберіть",
         "забери",
         "забрати",
         "зітри",
+        "зітріть",
         "стерти",
         "скасуй",
         "скасувати",
-        "не моє",
-        "це не моє",
         "delete",
         "remove",
         "del",
         "cancel",
+        "erase",
     }
 )
+# Whole-message phrases that ask for the same thing without a verb in them.
+DELETE_PHRASES = frozenset({"не моє", "це не моє", "не мій", "це не мій", "not mine"})
+# Words allowed to accompany a delete verb. Deliberately narrow: no "не" (so "не видали" stays a
+# refusal, not a deletion) and no ingredient or dish nouns.
+_DELETE_FILLERS = frozenset(
+    {
+        "цей",
+        "це",
+        "цю",
+        "цього",
+        "той",
+        "запис",
+        "записи",
+        "будь",
+        "ласка",
+        "плз",
+        "пліз",
+        "this",
+        "that",
+        "the",
+        "it",
+        "entry",
+        "record",
+        "please",
+        "pls",
+    }
+)
+_WORD = re.compile(r"[\w'’ʼ]+")
 
 
 def is_delete_request(text: str | None) -> bool:
-    """True when the whole message is a "throw this record away" word."""
-    return bool(text) and text.strip().lower().rstrip(".!") in DELETE_WORDS
+    """True when the message asks for the record to be thrown away and says nothing else."""
+    if not text:
+        return False
+    normalised = " ".join(text.strip().lower().split())
+    if normalised.rstrip(".!?") in DELETE_PHRASES:
+        return True
+    tokens = _WORD.findall(normalised)
+    if not any(token in DELETE_WORDS for token in tokens):
+        return False
+    return all(token in DELETE_WORDS or token in _DELETE_FILLERS for token in tokens)
 
 
 # -- water reminders ----------------------------------------------------------------------------

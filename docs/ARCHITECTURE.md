@@ -52,7 +52,9 @@ Inside `guarded` the routers are tried in order:
 2. `water` - `/вода` (`/water`, `/voda`): show, set or cancel the sender's water reminders.
 3. `corrections` - a reply to a bot message that starts with `≈` (the food-estimate prefix).
    A number -> `update_food_kcal(user_id, message_id)`. A delete word (`parsing.is_delete_request`)
-   -> `delete_food_entry`, registered first so "видали" is never shipped to Gemini as a correction
+   -> `delete_food_entry`, registered first so "видали" is never shipped to Gemini as a correction.
+   `parsing.is_delete_request` accepts a delete verb plus filler words only ("видали цей
+   запис"), so "прибери хліб" - drop an ingredient from the estimate - stays a correction
    of the dish. Any other text -> `get_food_entry`,
    re-download the photo by its stored `file_id` (if any), `GeminiClient.revise_food` with the
    earlier estimate + the user's text -> new `≈` reply -> `update_food_entry`, which also re-keys

@@ -609,6 +609,35 @@ async def test_reply_videly_deletes_the_food_row(harness, repo: FakeRepo, settin
     assert session.sent[-1]["text"] == f"{i18n.FOOD_DELETED} {i18n.day_total(500, 2000)}"
 
 
+async def test_a_wordy_delete_reply_still_deletes(harness, repo: FakeRepo, settings: Settings):
+    """Regression: "видали цей запис" fell through to Gemini as a correction and timed out."""
+    dp, bot, session, ai = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій")
+    await repo.upsert_user(me)
+    now = user_now(me, settings)
+    await repo.add_food(me, FoodEstimate(dish="борщ", kcal=600), now, "photo", 11)
+    borsch = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 11)
+
+    await dp.feed_update(bot, _update("видали цей запис", reply_to=borsch))
+    assert repo.rows["food"] == []
+    assert ai.revise_calls == []
+    assert session.sent[-1]["text"].startswith(i18n.FOOD_DELETED)
+
+
+async def test_a_delete_verb_with_an_ingredient_is_still_a_correction(harness, repo: FakeRepo):
+    """ "прибери хліб" drops the bread from the estimate; it must not drop the record."""
+    dp, bot, _, ai = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій")
+    await repo.upsert_user(me)
+    await repo.add_food(me, FoodEstimate(dish="борщ", kcal=600), datetime.now(), "photo", 11)
+    borsch = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 11)
+
+    await dp.feed_update(bot, _update("прибери хліб", reply_to=borsch))
+    assert len(repo.rows["food"]) == 1  # still there, re-estimated rather than deleted
+    # (no image: the row carries no photo_file_id, so the revision is text-only)
+    assert ai.revise_calls == [(False, "борщ", "прибери хліб")]
+
+
 async def test_deleting_someone_elses_food_row_is_refused(harness, repo: FakeRepo, user):
     dp, bot, session, _ = harness
     await repo.add_food(user, FoodEstimate(dish="борщ", kcal=600), datetime.now(), "photo", 778)

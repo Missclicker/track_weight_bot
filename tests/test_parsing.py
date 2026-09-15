@@ -3,6 +3,7 @@ from datetime import datetime, time
 import pytest
 
 from bot.parsing import (
+    DELETE_PHRASES,
     DELETE_WORDS,
     WaterSchedule,
     is_delete_request,
@@ -223,7 +224,7 @@ def test_target_clear_words_reject(text: str | None) -> None:
     assert not is_target_clear_request(text)
 
 
-@pytest.mark.parametrize("word", sorted(DELETE_WORDS))
+@pytest.mark.parametrize("word", sorted(DELETE_WORDS | DELETE_PHRASES))
 def test_delete_words_all_match(word: str) -> None:
     assert is_delete_request(word)
 
@@ -236,11 +237,29 @@ def test_delete_request_ignores_case_space_and_punctuation(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "видали цей запис",  # what a person actually types
+        "ВИДАЛИ ЦЕЙ ЗАПИС!",
+        "прибери цей запис",
+        "скасуй будь ласка",
+        "видали це",
+        "delete this please",
+    ],
+)
+def test_delete_request_allows_filler_around_the_verb(text: str) -> None:
+    """A delete verb plus words that add nothing is still a delete."""
+    assert is_delete_request(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         None,
         "",
         "це 300 г",  # ordinary corrections must fall through to Gemini ...
         "без хліба",
-        "видали хліб",  # ... and so must a delete word that is only part of the message
+        "видали хліб",  # ... and so must a delete verb carrying a noun: this one drops an
+        "прибери хліб",  # ingredient from the estimate, it does not drop the record
+        "видали 300",  # a number is not filler either
         "не видали",
         "650",
         "скасування",

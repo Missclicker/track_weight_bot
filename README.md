@@ -266,7 +266,7 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | `/sport біг 5 км 30 хв` (`/спорт …`)                                                                               | Gemini text parse → `sport`                                 |
 | `/food` or `/sport` with no text                                                                                   | the bot asks for it ("Чекаю опис …") and waits for a reply  |
 | reply to that prompt                                                                                               | recorded as food / sport for whoever replied                |
-| reply `видали` (`скасуй`, `прибери`, `delete`, …) to the bot's food estimate or sport confirmation                 | that row is removed from the sheet                          |
+| reply `видали` (`скасуй`, `прибери`, `delete`, …, optionally padded: `видали цей запис`) to the bot's food estimate or sport confirmation | that row is removed from the sheet. A verb carrying a noun (`прибери хліб`) is a correction instead |
 | reply `видали` to a `/food` or `/sport` prompt                                                                     | the command is cancelled, nothing is recorded               |
 | anything else                                                                                                      | ignored                                                     |
 
