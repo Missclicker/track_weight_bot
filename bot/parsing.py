@@ -103,6 +103,37 @@ def is_target_clear_request(text: str | None) -> bool:
     return bool(text) and text.strip().lower().rstrip(".!") in TARGET_CLEAR_WORDS
 
 
+# A reply of one of these words to a bot record ("видали") throws that record away. The whole
+# message must be the word: "без хліба" or "це 300 г" are corrections, not deletions, and a
+# substring match would eat them.
+DELETE_WORDS = frozenset(
+    {
+        "видали",
+        "видалити",
+        "видаліть",
+        "прибери",
+        "прибрати",
+        "забери",
+        "забрати",
+        "зітри",
+        "стерти",
+        "скасуй",
+        "скасувати",
+        "не моє",
+        "це не моє",
+        "delete",
+        "remove",
+        "del",
+        "cancel",
+    }
+)
+
+
+def is_delete_request(text: str | None) -> bool:
+    """True when the whole message is a "throw this record away" word."""
+    return bool(text) and text.strip().lower().rstrip(".!") in DELETE_WORDS
+
+
 # -- water reminders ----------------------------------------------------------------------------
 
 WATER_MIN_INTERVAL_MIN = 15

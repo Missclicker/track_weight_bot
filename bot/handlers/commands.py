@@ -23,6 +23,7 @@ from bot.handlers.weight import record_weight
 from bot.parsing import (
     KCAL_TARGET_MAX,
     KCAL_TARGET_MIN,
+    is_delete_request,
     is_target_clear_request,
     parse_kcal_target,
     parse_weight,
@@ -56,9 +57,22 @@ class InputPrompt(BaseFilter):
         if not (reply.text or "").startswith(self.prefix):
             return False
         text = (message.text or "").strip()
-        if not text:
+        # a delete word is somebody changing their mind about the command; `PromptCancel` takes it
+        if not text or is_delete_request(text):
             return False
         return {"payload": text[:_MAX_PROMPT_TEXT]}
+
+
+class PromptCancel(BaseFilter):
+    """A delete word ("видали", "скасуй") in reply to either input prompt: record nothing."""
+
+    async def __call__(self, message: Message, bot: Bot) -> bool:
+        reply = message.reply_to_message
+        if reply is None or reply.from_user is None or reply.from_user.id != bot.id:
+            return False
+        if not (reply.text or "").startswith(tuple(_PROMPT_PREFIXES.values())):
+            return False
+        return is_delete_request(message.text)
 
 
 async def cmd_start(message: Message, repo: SheetsRepo, settings: Settings) -> None:
@@ -131,6 +145,10 @@ async def on_sport_prompt_reply(
     message: Message, payload: str, repo: SheetsRepo, ai: GeminiClient, settings: Settings
 ) -> None:
     await record_sport(message, payload, repo, ai, settings, source="prompt")
+
+
+async def on_prompt_cancel(message: Message) -> None:
+    await message.reply(i18n.PROMPT_CANCELLED)
 
 
 async def cmd_today(message: Message, repo: SheetsRepo, settings: Settings) -> None:
@@ -206,6 +224,7 @@ def build() -> Router:
     # after the commands, but still in the first router inside `guarded`: an answer to the food
     # prompt must be read as food even when it is a bare number (which `weight` would grab) or a
     # reply the `corrections` router would otherwise inspect.
+    router.message.register(on_prompt_cancel, PromptCancel())
     router.message.register(on_food_prompt_reply, InputPrompt("food"))
     router.message.register(on_sport_prompt_reply, InputPrompt("sport"))
     return router

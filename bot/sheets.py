@@ -10,8 +10,8 @@ Tab layout (headers must match the README):
             daily_kcal_target
     weight  ts, date, user_id, name, kg, source
     food    ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g,
-            veg_share, confidence, source, message_id, corrected, photo_file_id
-    sport   ts, date, user_id, name, activity, minutes, distance_km, kcal, source
+            veg_share, confidence, source, message_id, corrected, photo_file_id, portion
+    sport   ts, date, user_id, name, activity, minutes, distance_km, kcal, source, message_id
     reports ts, week_start, chat_id, text
     water   user_id, chat_id, name, tz, days, start, end, every_min, active, updated_at
 """
@@ -77,6 +77,9 @@ HEADERS: dict[str, list[str]] = {
         "message_id",
         "corrected",
         "photo_file_id",
+        # new columns go at the END of a tab: an existing spreadsheet then only gains a trailing
+        # column instead of having every value shifted one place to the right.
+        "portion",
     ],
     "sport": [
         "ts",
@@ -88,6 +91,7 @@ HEADERS: dict[str, list[str]] = {
         "distance_km",
         "kcal",
         "source",
+        "message_id",
     ],
     "reports": ["ts", "week_start", "chat_id", "text"],
     "water": [
@@ -300,6 +304,17 @@ def explain_startup_error(exc: Exception, settings: Settings, sa_email: str | No
     if isinstance(exc, ValueError):
         return f"Service-account key is not a valid JSON key file: {exc}"
     return f"{type(exc).__name__}: {exc}"
+
+
+_FOOD_NUMERIC = ("kcal", "alcohol_kcal", "protein_g", "fat_g", "carbs_g", "veg_share", "confidence")
+_FOOD_TEXT = ("dish", "portion", "date", "source", "photo_file_id")
+
+
+def _food_entry(row: dict[str, Any]) -> dict[str, Any]:
+    """One `food` row the way handlers want it: numbers as floats, the rest as strings."""
+    entry: dict[str, Any] = {k: num(row.get(k)) for k in _FOOD_NUMERIC}
+    entry.update({k: row.get(k, "") for k in _FOOD_TEXT})
+    return entry
 
 
 class SheetsRepo:
@@ -549,6 +564,7 @@ class SheetsRepo:
             message_id,
             "FALSE",
             photo_file_id,
+            est.portion,
         ]
         await self._run(self._append, "food", row)
 
@@ -561,7 +577,10 @@ class SheetsRepo:
         kcal: float,
         when: datetime,
         source: str,
+        message_id: int = 0,
     ) -> None:
+        # `message_id` is the bot's confirmation, so a reply to it can find this row again;
+        # 0 means "no message to reply to" and simply makes the row undeletable from the chat.
         row = [
             when.isoformat(timespec="seconds"),
             when.date().isoformat(),
@@ -572,6 +591,7 @@ class SheetsRepo:
             _blank(distance_km),
             kcal,
             source,
+            message_id,
         ]
         await self._run(self._append, "sport", row)
 
@@ -605,6 +625,24 @@ class SheetsRepo:
                 return idx, dict(zip(HEADERS["food"], row, strict=False))
         return None
 
+    def _find_sport_row_sync(self, user_id: int, message_id: int) -> int | None:
+        """1-based row number of `user_id`'s sport row announced in `message_id`, or None.
+
+        Scoped by owner for the same reasons as `_find_food_row_sync`: Telegram message ids are
+        per-chat counters, and nobody may throw away somebody else's activity.
+        """
+        rows = with_retry(self._ws("sport").get_all_values)
+        col_uid = HEADERS["sport"].index("user_id")
+        col_msg = HEADERS["sport"].index("message_id")
+        for idx, row in enumerate(rows[1:], start=2):
+            if (
+                len(row) > col_msg
+                and row[col_msg] == str(message_id)
+                and row[col_uid] == str(user_id)
+            ):
+                return idx
+        return None
+
     def _update_food_cells_sync(
         self, user_id: int, message_id: int, values: dict[str, Any]
     ) -> bool:
@@ -627,24 +665,7 @@ class SheetsRepo:
     async def get_food_entry(self, user_id: int, message_id: int) -> dict[str, Any] | None:
         """The stored estimate behind a bot food message (numbers as floats), or None."""
         found = await self._run(self._find_food_row_sync, user_id, message_id)
-        if found is None:
-            return None
-        _, row = found
-        numeric = (
-            "kcal",
-            "alcohol_kcal",
-            "protein_g",
-            "fat_g",
-            "carbs_g",
-            "veg_share",
-            "confidence",
-        )
-        entry: dict[str, Any] = {k: num(row.get(k)) for k in numeric}
-        entry["dish"] = row.get("dish", "")
-        entry["date"] = row.get("date", "")
-        entry["source"] = row.get("source", "")
-        entry["photo_file_id"] = row.get("photo_file_id", "")
-        return entry
+        return None if found is None else _food_entry(found[1])
 
     async def update_food_kcal(self, user_id: int, message_id: int, kcal: float) -> bool:
         """Set `kcal` on the food row announced in `message_id`; False if it is not the sender's."""
@@ -666,10 +687,43 @@ class SheetsRepo:
             "carbs_g": est.carbs_g,
             "veg_share": est.veg_share,
             "confidence": est.confidence,
+            "portion": est.portion,
             "message_id": new_message_id,
             "corrected": "TRUE",
         }
         return await self._run(self._update_food_cells_sync, user_id, message_id, values)
+
+    # -- deletions --------------------------------------------------------------------------
+
+    def _delete_food_row_sync(self, user_id: int, message_id: int) -> dict[str, str] | None:
+        found = self._find_food_row_sync(user_id, message_id)
+        if found is None:
+            return None
+        row_no, row = found
+        with_retry(self._ws("food").delete_rows, row_no)
+        return row
+
+    async def delete_food_entry(self, user_id: int, message_id: int) -> dict[str, Any] | None:
+        """Drop the food row announced in `message_id`; the deleted row, or None if not found.
+
+        A hard delete rather than a `deleted` flag: every aggregation (`day_food`,
+        `today_summary`, the weekly payload, `user_rows_between`) then stays correct without
+        having to learn about the flag. The row is returned so the caller can recompute the day
+        total for the date it belonged to without a second scan of the tab.
+        """
+        row = await self._run(self._delete_food_row_sync, user_id, message_id)
+        return None if row is None else _food_entry(row)
+
+    def _delete_sport_row_sync(self, user_id: int, message_id: int) -> bool:
+        row_no = self._find_sport_row_sync(user_id, message_id)
+        if row_no is None:
+            return False
+        with_retry(self._ws("sport").delete_rows, row_no)
+        return True
+
+    async def delete_sport_entry(self, user_id: int, message_id: int) -> bool:
+        """Drop the sport row announced in `message_id`; False if it is not the sender's."""
+        return await self._run(self._delete_sport_row_sync, user_id, message_id)
 
     # -- queries ----------------------------------------------------------------------------
 

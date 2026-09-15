@@ -24,12 +24,20 @@ log = logging.getLogger(__name__)
 REQUEST_TIMEOUT_S = 45.0
 _TRANSIENT_CODES = frozenset({429, 500, 502, 503, 504})
 _RETRIES = 1
+_MAX_PORTION_CHARS = 40
 
 
 class FoodEstimate(BaseModel):
     """What the model returns for one meal. All numbers are per the whole portion shown."""
 
     dish: str = Field(description="Short dish name in Ukrainian")
+    portion: str = Field(
+        default="",
+        description=(
+            "Portion size as a short Ukrainian string, e.g. '400 г', '2 шт', '330 мл'; "
+            "empty if unknown"
+        ),
+    )
     kcal: float = Field(ge=0, le=10_000, description="Total energy including alcohol")
     alcohol_kcal: float = Field(default=0, ge=0, le=10_000, description="Energy from alcohol only")
     protein_g: float = Field(default=0, ge=0, le=1_000)
@@ -71,10 +79,13 @@ class FoodEstimate(BaseModel):
         lo, hi = bounds[info.field_name]
         return min(max(number, lo), hi)
 
-    @field_validator("dish", "notes", mode="before")
+    @field_validator("dish", "notes", "portion", mode="before")
     @classmethod
-    def _strip(cls, value: Any) -> str:
-        return str(value or "").strip()
+    def _strip(cls, value: Any, info: Any) -> str:
+        text = str(value or "").strip()
+        # `portion` is appended to the one-line "≈ ..." reply, so it is capped here rather than
+        # trusted: a chatty model must not be able to turn that line into a paragraph.
+        return text[:_MAX_PORTION_CHARS] if info.field_name == "portion" else text
 
 
 class SportParse(BaseModel):
@@ -98,7 +109,9 @@ class SportEntry(BaseModel):
 FOOD_PROMPT = (
     "You are a nutrition assistant for a Ukrainian friend group tracking calories. "
     "Estimate the meal shown{source}. Consider the whole portion visible. "
-    "Return JSON only, matching the schema: dish (short name in Ukrainian), kcal (total, "
+    "Return JSON only, matching the schema: dish (short name in Ukrainian), portion (the size of "
+    'the whole portion the estimate covers, as a short Ukrainian string such as "400 г", '
+    '"2 шт" or "330 мл"; empty only if you really cannot guess), kcal (total, '
     "including alcohol), alcohol_kcal (energy from alcoholic drinks only, 0 if none), protein_g, "
     "fat_g, carbs_g, veg_share (fraction 0..1 of the plate that is vegetables/greens), confidence "
     "(0..1), notes (one short remark in Ukrainian or empty), is_food (false if there is no food "
@@ -111,7 +124,10 @@ REVISE_PROMPT = (
     "correction: typically a different portion weight, a missing or wrong ingredient, or another "
     "dish name. Produce a revised estimate for the whole portion that applies the correction and "
     "keeps everything the user did not mention consistent with the earlier estimate. "
-    "Return JSON only, matching the schema: dish (short name in Ukrainian), kcal (total, "
+    "Return JSON only, matching the schema: dish (short name in Ukrainian), portion (the size of "
+    "the whole portion the revised estimate covers, as a short Ukrainian string such as "
+    '"400 г", "2 шт" or "330 мл" - keep the earlier one unless the correction changes it, empty '
+    "only if you really cannot guess), kcal (total, "
     "including alcohol), alcohol_kcal, protein_g, fat_g, carbs_g, veg_share (0..1), confidence "
     "(0..1), notes (one short remark in Ukrainian or empty), is_food (false only if the "
     "correction makes clear this is not food or drink).\n"
@@ -239,7 +255,16 @@ class GeminiClient:
         correction: str,
     ) -> FoodEstimate:
         """Re-estimate a meal after the user corrected it in free text (weight, ingredients...)."""
-        fields = ("dish", "kcal", "alcohol_kcal", "protein_g", "fat_g", "carbs_g", "veg_share")
+        fields = (
+            "dish",
+            "portion",
+            "kcal",
+            "alcohol_kcal",
+            "protein_g",
+            "fat_g",
+            "carbs_g",
+            "veg_share",
+        )
         earlier = json.dumps({k: previous.get(k) for k in fields}, ensure_ascii=False)
         if image_bytes is not None:
             prompt = REVISE_PROMPT.format(

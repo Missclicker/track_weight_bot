@@ -8,6 +8,7 @@ from bot.ai import FoodEstimate, SportParse
 
 SAMPLE = {
     "dish": " Борщ з хлібом ",
+    "portion": " 400 г ",
     "kcal": 650,
     "alcohol_kcal": 0,
     "protein_g": 25,
@@ -23,6 +24,7 @@ SAMPLE = {
 def test_food_estimate_from_json() -> None:
     est = FoodEstimate.model_validate_json(json.dumps(SAMPLE))
     assert est.dish == "Борщ з хлібом"
+    assert est.portion == "400 г"
     assert est.kcal == 650
     assert est.veg_share == 0.4
     assert est.is_food is True
@@ -42,8 +44,16 @@ def test_food_estimate_defaults_for_missing_optional_fields() -> None:
     est = FoodEstimate.model_validate({"dish": "яблуко", "kcal": 80})
     assert est.alcohol_kcal == 0
     assert est.notes == ""
+    assert est.portion == ""
     assert est.confidence == 0.5
     assert est.is_food is True
+
+
+def test_food_estimate_portion_is_stripped_and_capped() -> None:
+    est = FoodEstimate.model_validate({**SAMPLE, "portion": "  " + "дуже довга порція " * 10})
+    assert len(est.portion) == 40
+    assert est.portion.startswith("дуже довга")
+    assert FoodEstimate.model_validate({**SAMPLE, "portion": None}).portion == ""
 
 
 def test_food_estimate_requires_dish_and_kcal() -> None:
@@ -56,9 +66,8 @@ def test_food_estimate_rejects_garbage_number() -> None:
         FoodEstimate.model_validate({**SAMPLE, "kcal": "багато"})
 
 
-def test_food_estimate_reply_text_starts_with_prefix_and_escapes() -> None:
-    est = FoodEstimate.model_validate({**SAMPLE, "dish": "Салат <Цезар>", "alcohol_kcal": 120})
-    text = i18n.food_estimate(
+def _reply(est: FoodEstimate) -> str:
+    return i18n.food_estimate(
         est.dish,
         est.kcal,
         est.alcohol_kcal,
@@ -67,11 +76,29 @@ def test_food_estimate_reply_text_starts_with_prefix_and_escapes() -> None:
         est.carbs_g,
         est.veg_share,
         est.notes,
+        portion=est.portion,
     )
+
+
+def test_food_estimate_reply_text_starts_with_prefix_and_escapes() -> None:
+    est = FoodEstimate.model_validate(
+        {**SAMPLE, "dish": "Салат <Цезар>", "portion": "300 г <b>", "alcohol_kcal": 120}
+    )
+    text = _reply(est)
     assert text.startswith(i18n.FOOD_PREFIX)
     assert "&lt;Цезар&gt;" in text
     assert "алкоголь: 120" in text
     assert "Впевненість" not in text  # the model's confidence is stored, never shown
+    # the portion is model-supplied text on the same HTML line, so it is escaped too
+    assert text.splitlines()[0].endswith(", 300 г &lt;b&gt;")
+
+
+def test_food_estimate_reply_shows_the_portion_only_when_there_is_one() -> None:
+    est = FoodEstimate(dish="картопля з м’ясом", kcal=520, portion="400 г")
+    assert _reply(est).splitlines()[0] == "≈ 520 ккал - картопля з м’ясом, 400 г"
+    assert _reply(est.model_copy(update={"portion": ""})).splitlines()[0] == (
+        "≈ 520 ккал - картопля з м’ясом"
+    )
 
 
 def test_sport_parse_schema() -> None:

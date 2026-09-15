@@ -98,6 +98,7 @@ class FakeRepo:
                 message_id,
                 "FALSE",
                 photo_file_id,
+                est.portion,
             ],
         )
 
@@ -110,6 +111,7 @@ class FakeRepo:
         kcal: float,
         when: datetime,
         source: str,
+        message_id: int = 0,
     ) -> None:
         self._append(
             "sport",
@@ -123,6 +125,7 @@ class FakeRepo:
                 distance_km if distance_km is not None else "",
                 kcal,
                 source,
+                message_id,
             ],
         )
 
@@ -158,9 +161,31 @@ class FakeRepo:
             carbs_g=est.carbs_g,
             veg_share=est.veg_share,
             confidence=est.confidence,
+            portion=est.portion,
             message_id=new_message_id,
             corrected="TRUE",
         )
+        return True
+
+    async def delete_food_entry(self, user_id: int, message_id: int) -> dict[str, Any] | None:
+        row = self._food_row(user_id, message_id)
+        if row is None:
+            return None
+        self.rows["food"].remove(row)
+        return dict(row)
+
+    async def delete_sport_entry(self, user_id: int, message_id: int) -> bool:
+        row = next(
+            (
+                r
+                for r in self.rows["sport"]
+                if r["message_id"] == message_id and r["user_id"] == user_id
+            ),
+            None,
+        )
+        if row is None:
+            return False
+        self.rows["sport"].remove(row)
         return True
 
     async def update_food_kcal(self, user_id: int, message_id: int, kcal: float) -> bool:

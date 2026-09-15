@@ -3,7 +3,9 @@ from datetime import datetime, time
 import pytest
 
 from bot.parsing import (
+    DELETE_WORDS,
     WaterSchedule,
+    is_delete_request,
     is_target_clear_request,
     is_water_due,
     parse_correction,
@@ -219,3 +221,30 @@ def test_target_clear_words(text: str) -> None:
 @pytest.mark.parametrize("text", [None, "", "2000", "стоп пити", "стопкран"])
 def test_target_clear_words_reject(text: str | None) -> None:
     assert not is_target_clear_request(text)
+
+
+@pytest.mark.parametrize("word", sorted(DELETE_WORDS))
+def test_delete_words_all_match(word: str) -> None:
+    assert is_delete_request(word)
+
+
+@pytest.mark.parametrize("text", ["Видали", " ВИДАЛИ! ", "Скасуй.", "Delete", "Це не моє"])
+def test_delete_request_ignores_case_space_and_punctuation(text: str) -> None:
+    assert is_delete_request(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,
+        "",
+        "це 300 г",  # ordinary corrections must fall through to Gemini ...
+        "без хліба",
+        "видали хліб",  # ... and so must a delete word that is only part of the message
+        "не видали",
+        "650",
+        "скасування",
+    ],
+)
+def test_delete_request_rejects(text: str | None) -> None:
+    assert not is_delete_request(text)

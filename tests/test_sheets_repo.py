@@ -44,6 +44,9 @@ class FakeWorksheet:
         row_no = int("".join(ch for ch in range_name if ch.isdigit()))
         self.rows[row_no - 1] = [str(v) for v in values[0]]
 
+    def delete_rows(self, row_no: int) -> None:
+        del self.rows[row_no - 1]
+
     def batch_update(self, data: list[dict[str, Any]]) -> None:
         for item in data:
             col = ord(item["range"][0]) - ord("A")
@@ -221,23 +224,57 @@ async def test_last_weight_accepts_decimal_comma_cell(repo: SheetsRepo):
 async def test_get_and_update_food_entry(repo: SheetsRepo):
     now = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
     alice = User(user_id=1, chat_id=-100, name="Alice")
-    est = FoodEstimate(dish="борщ", kcal=600, protein_g=20, veg_share=0.4)
+    est = FoodEstimate(dish="борщ", kcal=600, protein_g=20, veg_share=0.4, portion="400 г")
     await repo.add_food(alice, est, now, "photo", 42, "AgACfile")
 
     entry = await repo.get_food_entry(1, 42)
     assert entry is not None
     assert (entry["dish"], entry["kcal"], entry["veg_share"]) == ("борщ", 600.0, 0.4)
     assert entry["photo_file_id"] == "AgACfile"
+    assert entry["portion"] == "400 г"
     assert await repo.get_food_entry(2, 42) is None  # someone else's
 
-    revised = FoodEstimate(dish="борщ з хлібом", kcal=720, carbs_g=60)
+    revised = FoodEstimate(dish="борщ з хлібом", kcal=720, carbs_g=60, portion="500 г")
     assert await repo.update_food_entry(1, 42, revised, new_message_id=43) is True
     assert await repo.get_food_entry(1, 42) is None  # re-keyed ...
     after = await repo.get_food_entry(1, 43)
     assert after is not None and (after["dish"], after["kcal"]) == ("борщ з хлібом", 720.0)
+    assert after["portion"] == "500 г"
     row = ws(repo, "food").rows[1]
     assert row[HEADERS["food"].index("corrected")] == "TRUE"
     assert row[HEADERS["food"].index("photo_file_id")] == "AgACfile"  # kept for later corrections
+
+
+async def test_delete_food_entry_removes_the_row_and_returns_it(repo: SheetsRepo):
+    now = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+    alice = User(user_id=1, chat_id=-100, name="Alice")
+    bob = User(user_id=2, chat_id=-200, name="Bob")
+    await repo.add_food(bob, FoodEstimate(dish="pizza", kcal=900), now, "photo", 42)
+    await repo.add_food(alice, FoodEstimate(dish="борщ", kcal=600), now, "photo", 42)
+
+    assert await repo.delete_food_entry(3, 42) is None  # not the sender's
+    deleted = await repo.delete_food_entry(1, 42)
+    assert deleted is not None and deleted["dish"] == "борщ"
+    assert deleted["date"] == "2026-09-08"  # the caller totals that day again
+    # a hard delete: the row is gone from the tab, Bob's same-message_id row untouched
+    assert len(ws(repo, "food").rows) == 2
+    assert await repo.get_food_entry(1, 42) is None
+    assert await repo.get_food_entry(2, 42) is not None
+    assert await repo.delete_food_entry(1, 42) is None  # already gone
+
+
+async def test_delete_sport_entry_is_scoped_to_owner(repo: SheetsRepo):
+    now = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+    alice = User(user_id=1, chat_id=-100, name="Alice")
+    bob = User(user_id=2, chat_id=-200, name="Bob")
+    await repo.add_sport(bob, "біг", 30, 5, 390, now, "command", message_id=77)
+    await repo.add_sport(alice, "зал", 60, None, 400, now, "command", message_id=77)
+
+    assert await repo.delete_sport_entry(3, 77) is False
+    assert await repo.delete_sport_entry(1, 77) is True
+    rows = ws(repo, "sport").rows
+    assert len(rows) == 2 and rows[1][HEADERS["sport"].index("name")] == "Bob"
+    assert await repo.delete_sport_entry(1, 77) is False
 
 
 async def test_set_daily_kcal_target_writes_only_that_cell(repo: SheetsRepo) -> None:

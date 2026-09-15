@@ -90,7 +90,7 @@ async def find_member(user_id: int, repo: SheetsRepo, settings: Settings) -> Use
 
 def build_router() -> Router:
     """Root router: allowed-chat handlers first, then the private-chat handlers."""
-    from bot.handlers import commands, corrections, photos, water, weight
+    from bot.handlers import commands, corrections, photos, sport, water, weight
 
     root = Router(name="root")
 
@@ -112,6 +112,7 @@ def build_router() -> Router:
         corrections.build(),
         weight.build(),
         photos.build(),
+        sport.build(),
     )
 
     root.include_routers(guarded, private)

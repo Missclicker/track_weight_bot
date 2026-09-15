@@ -43,6 +43,7 @@ async def record_food(
             est.carbs_g,
             est.veg_share,
             est.notes,
+            portion=est.portion,
             day_total_line=total_line,
         )
     )

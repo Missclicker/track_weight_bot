@@ -582,6 +582,71 @@ async def test_target_command_sets_shows_and_clears(harness, repo: FakeRepo, set
     assert "ціль" not in session.sent[-1]["text"]
 
 
+async def test_reply_videly_deletes_the_food_row(harness, repo: FakeRepo, settings: Settings):
+    dp, bot, session, ai = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій", daily_kcal_target=2000)
+    await repo.upsert_user(me)
+    now = user_now(me, settings)
+    await repo.add_food(me, FoodEstimate(dish="омлет", kcal=500), now, "text", 10)
+    await repo.add_food(me, FoodEstimate(dish="борщ", kcal=600), now, "text", 11)
+    borsch = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 11)
+
+    await dp.feed_update(bot, _update("видали", reply_to=borsch))
+    assert [r["dish"] for r in repo.rows["food"]] == ["омлет"]  # the row is gone, not flagged
+    assert ai.revise_calls == []  # and the word never reached Gemini
+    assert session.sent[-1]["text"] == f"{i18n.FOOD_DELETED} {i18n.day_total(500, 2000)}"
+
+
+async def test_deleting_someone_elses_food_row_is_refused(harness, repo: FakeRepo, user):
+    dp, bot, session, _ = harness
+    await repo.add_food(user, FoodEstimate(dish="борщ", kcal=600), datetime.now(), "photo", 778)
+    food_msg = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 778)
+    await dp.feed_update(bot, _update("видали", reply_to=food_msg))
+    assert len(repo.rows["food"]) == 1
+    assert session.sent[-1]["text"] == i18n.CORRECTION_NOT_FOUND
+
+
+async def test_reply_videly_deletes_the_sport_row(harness, repo: FakeRepo) -> None:
+    dp, bot, session, _ = harness
+    await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
+    confirmation = session.sent[-1]["text"]
+    assert confirmation.startswith(i18n.SPORT_PREFIX)
+    row = repo.rows["sport"][0]
+    assert row["message_id"] == 1001  # keyed to the confirmation, not to the command
+
+    sport_msg = _bot_message(confirmation, 1001)
+    await dp.feed_update(bot, _update("скасуй", reply_to=sport_msg, message_id=2))
+    assert repo.rows["sport"] == []
+    assert session.sent[-1]["text"] == i18n.SPORT_DELETED
+
+    # a second try, and somebody else's entry, find nothing
+    await dp.feed_update(bot, _update("видали", reply_to=sport_msg, message_id=3))
+    assert session.sent[-1]["text"] == i18n.SPORT_NOT_FOUND_FOR_DELETE
+
+
+async def test_the_food_estimate_shows_the_portion(harness, repo: FakeRepo) -> None:
+    dp, bot, session, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="омлет", kcal=500, portion="250 г")]
+    await dp.feed_update(bot, _update("/food омлет"))
+    assert session.sent[-1]["text"].startswith(i18n.FOOD_PREFIX + " 500 ккал - омлет, 250 г")
+    assert repo.rows["food"][0]["portion"] == "250 г"
+
+
+async def test_delete_word_answering_the_food_prompt_records_nothing(harness, repo: FakeRepo):
+    dp, bot, session, ai = harness
+    unused = FoodEstimate(dish="борщ", kcal=500)
+    ai.food_estimates = [unused]
+    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    await dp.feed_update(bot, _update("скасуй", reply_to=prompt))
+    assert session.sent[-1]["text"] == i18n.PROMPT_CANCELLED
+    assert ai.food_estimates == [unused] and repo.rows["food"] == []  # no AI call, nothing stored
+
+    sport_prompt = _bot_message(i18n.SPORT_INPUT_PROMPT, 1002)
+    await dp.feed_update(bot, _update("видали", reply_to=sport_prompt, message_id=2))
+    assert session.sent[-1]["text"] == i18n.PROMPT_CANCELLED
+    assert ai.sport_calls == [] and repo.rows["sport"] == []
+
+
 def test_target_suffix_hides_missing_or_broken_targets() -> None:
     assert i18n.kcal_today("A", "2026-09-10", [("x", 100)], None).endswith("Разом: 100 ккал.")
     assert i18n.kcal_today("A", "2026-09-10", [("x", 100)], 0).endswith("Разом: 100 ккал.")

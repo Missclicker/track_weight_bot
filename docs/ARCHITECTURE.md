@@ -47,24 +47,36 @@ Inside `guarded` the routers are tried in order:
    prompt and the reply to it is recorded - the `InputPrompt` filter recognises the prompt by its
    text prefix, so it survives a restart. Those two handlers are registered in `commands`, the
    first router inside `guarded`, on purpose: a bare number answering the food prompt must be read
-   as food rather than grabbed by `weight`.
+   as food rather than grabbed by `weight`. A delete word answering either prompt (`PromptCancel`,
+   registered before them) cancels the command instead: no Gemini call, no row.
 2. `water` - `/вода` (`/water`, `/voda`): show, set or cancel the sender's water reminders.
 3. `corrections` - a reply to a bot message that starts with `≈` (the food-estimate prefix).
-   A number -> `update_food_kcal(user_id, message_id)`. Any other text -> `get_food_entry`,
+   A number -> `update_food_kcal(user_id, message_id)`. A delete word (`parsing.is_delete_request`)
+   -> `delete_food_entry`, registered first so "видали" is never shipped to Gemini as a correction
+   of the dish. Any other text -> `get_food_entry`,
    re-download the photo by its stored `file_id` (if any), `GeminiClient.revise_food` with the
    earlier estimate + the user's text -> new `≈` reply -> `update_food_entry`, which also re-keys
-   the row to the new reply's `message_id` so corrections can be chained. Both are scoped to the
-   sender, so only the author of an entry can correct it and equal `message_id`s from different
-   groups never collide. Both replies end with the corrected total for the day the entry
-   belongs to ("за сьогодні" or "за <date>"), read back from the sheet after the update.
+   the row to the new reply's `message_id` so corrections can be chained. All three are scoped to
+   the sender, so only the author of an entry can correct or delete it and equal `message_id`s from
+   different groups never collide. All three replies end with the total for the day the entry
+   belongs to ("за сьогодні" or "за <date>"), read back from the sheet after the write.
 4. `weight` - a bare number in `[WEIGHT_MIN, WEIGHT_MAX]` that is not a reply, or a number in
    reply to the morning ping (recognised by the ping text, so it survives restarts) -> `add_weight`.
 5. `photos` - any photo -> Gemini vision -> reply -> `add_food` with the *reply's* `message_id`
    so a later correction can find the row.
+6. `sport` - a delete word in reply to a bot message starting with `Спорт:` -> `delete_sport_entry`.
+   That is the whole router: any other reply to a sport confirmation is ignored, re-estimating an
+   activity is not a thing the bot does.
 
-Sport has no router of its own: free text is never scanned for sport keywords (too many false
-positives in a chatty group), so `sport.record_sport` is reached only from `/sport` and its prompt
-reply -> Gemini text parse -> kcal from the MET table -> `add_sport`.
+Recording sport has no router of its own: free text is never scanned for sport keywords (too many
+false positives in a chatty group), so `sport.record_sport` is reached only from `/sport` and its
+prompt reply -> Gemini text parse -> kcal from the MET table -> reply -> `add_sport` with the
+reply's `message_id`, the same ordering `photos.record_food` uses.
+
+**Deletes are hard deletes** (`worksheet.delete_rows`), not a `deleted` flag: every aggregation
+(`day_food`, `today_summary`, `build_weekly_payload`, `user_rows_between`) then stays correct
+without learning about a flag. `delete_food_entry` returns the row it removed so the handler can
+total that entry's day again without a second scan of the tab.
 
 Filters return a `dict` on match (`{"kg": 84.3, "source": "text"}`), which aiogram injects into
 the handler - so parsing happens once and unmatched messages fall through to the next router.
@@ -103,6 +115,11 @@ message first and stores the subscription only when it went through.
 **Errors.** A global error handler logs the exception and replies with a short "не вийшло,
 спробуй ще" (it only fires when a handler matched, so the sender was always waiting). The
 polling loop never dies because of a handler.
+
+**Trailing columns.** `food.portion` (the portion size the model priced, shown on the `≈` line so
+the user can see what the calories were computed for) and `sport.message_id` (the confirmation a
+delete replies to) are the *last* entries of their `HEADERS` lists: an existing spreadsheet then
+only gains a trailing column instead of having every value shifted right.
 
 **Sheets writes.** Everything is appended with `value_input_option=RAW`: names and dishes can
 never be evaluated as formulas, and the ISO `date`/`ts` strings we filter on are not re-formatted

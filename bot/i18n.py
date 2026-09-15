@@ -9,6 +9,7 @@ from html import escape
 from bot.parsing import WATER_ALL_DAYS, WATER_WEEKDAYS, WATER_WEEKEND, WaterSchedule
 
 FOOD_PREFIX = "≈"  # replies to messages starting with this are treated as kcal corrections
+SPORT_PREFIX = "Спорт:"  # ... and replies to messages starting with this can delete the activity
 
 PRIVATE_CHAT_ONLY_GROUP = "Цей бот працює лише в груповому чаті."
 
@@ -45,7 +46,8 @@ HELP = (
     "/week або /тиждень - звіт за 7 останніх повних днів (без сьогодні)\n"
     "/water будні з 9 до 18 кожні 30 хв або /вода ... - нагадування пити воду в особисті\n"
     "/help або /довідка - ця довідка\n\n"
-    "Оцінки з фото приблизні (±30-50 %). Щоб виправити - відповідай на оцінку числом ккал."
+    "Оцінки з фото приблизні (±30-50 %). Щоб виправити - відповідай на оцінку числом ккал.\n"
+    'Щоб прибрати запис про їжу чи активність - відповідай на нього словом "видали".'
 )
 
 START_REGISTERED = "Записав тебе, {name}. Щоранку до {deadline} чекаю на вагу.\n\n" + HELP
@@ -75,13 +77,17 @@ CORRECTION_NOT_UNDERSTOOD = (
     "Не зрозумів уточнення. Напиши, що змінити: вагу порції, склад або назву страви."
 )
 CORRECTED_MARK = "Виправлено за твоїм уточненням."
+FOOD_DELETED = "Видалив запис."
+PROMPT_CANCELLED = "Скасував."
 
 SPORT_INPUT_PROMPT_PREFIX = "Чекаю опис активності."
 SPORT_INPUT_PROMPT = (
     SPORT_INPUT_PROMPT_PREFIX + " Відповідай на це повідомлення, наприклад: біг 5 км 30 хв."
 )
 SPORT_NOT_RECOGNIZED = 'Не розпізнав активність. Спробуй так: "біг 5 км 30 хв" або "зал 1 година".'
-SPORT_SAVED = "Записав: {activity}, {minutes} хв{distance} - близько {kcal} ккал."
+SPORT_SAVED = SPORT_PREFIX + " {activity}, {minutes} хв{distance} - близько {kcal} ккал."
+SPORT_DELETED = "Видалив запис про активність."
+SPORT_NOT_FOUND_FOR_DELETE = "Не знайшов запис для видалення."
 
 WATER_USAGE = (
     "Нагадування пити воду. Напиши, коли і як часто:\n"
@@ -189,16 +195,21 @@ def food_estimate(
     carbs_g: float,
     veg_share: float,
     notes: str,
+    portion: str = "",
     corrected: bool = False,
     day_total_line: str | None = None,
 ) -> str:
     """Bot reply to a food photo, `/food` text or a correction. Must start with FOOD_PREFIX.
 
-    `day_total_line` is the `day_total(...)` text for the day this entry belongs to, including
-    the entry itself.
+    `portion` is the size the estimate covers ("400 г"); it is shown so the user can see what the
+    calories were computed for and correct it. `day_total_line` is the `day_total(...)` text for
+    the day this entry belongs to, including the entry itself.
     """
+    dish_line = f"{FOOD_PREFIX} {kcal:.0f} ккал - {escape(dish)}"
+    if portion:
+        dish_line += f", {escape(portion)}"
     lines = [
-        f"{FOOD_PREFIX} {kcal:.0f} ккал - {escape(dish)}",
+        dish_line,
         f"Білки {protein_g:.0f} г, жири {fat_g:.0f} г, вуглеводи {carbs_g:.0f} г, "
         f"овочі {veg_share * 100:.0f} %.",
     ]

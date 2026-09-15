@@ -88,8 +88,8 @@ Sheet layout (for reference / manual edits):
 | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `users`   | `user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg, daily_kcal_target`                                                  |
 | `weight`  | `ts, date, user_id, name, kg, source`                                                                                                               |
-| `food`    | `ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g, veg_share, confidence, source, message_id, corrected, photo_file_id` |
-| `sport`   | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source`                                                                             |
+| `food`    | `ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g, veg_share, confidence, source, message_id, corrected, photo_file_id, portion` |
+| `sport`   | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source, message_id`                                                                 |
 | `reports` | `ts, week_start, chat_id, text`                                                                                                                     |
 | `water`   | `user_id, chat_id, name, tz, days, start, end, every_min, active, updated_at`                                                                       |
 
@@ -256,7 +256,7 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 
 | message                                                                                                            | action                                                      |
 | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| photo (optionally with caption)                                                                                    | Gemini vision → kcal estimate (+ today's running total) → `food` |
+| photo (optionally with caption)                                                                                    | Gemini vision → kcal estimate with the portion it assumed, e.g. `≈ 520 ккал - картопля з м'ясом, 400 г` (+ today's running total) → `food` |
 | bare number in `[WEIGHT_MIN, WEIGHT_MAX]`, e.g. `84.3` / `84,3`                                                    | weight → `weight`                                           |
 | reply to the bot's morning ping with a number                                                                      | weight                                                      |
 | reply to the bot's food estimate with a number                                                                     | sets kcal of that estimate                                  |
@@ -266,10 +266,15 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | `/sport біг 5 км 30 хв` (`/спорт …`)                                                                               | Gemini text parse → `sport`                                 |
 | `/food` or `/sport` with no text                                                                                   | the bot asks for it ("Чекаю опис …") and waits for a reply  |
 | reply to that prompt                                                                                               | recorded as food / sport for whoever replied                |
+| reply `видали` (`скасуй`, `прибери`, `delete`, …) to the bot's food estimate or sport confirmation                 | that row is removed from the sheet                          |
+| reply `видали` to a `/food` or `/sport` prompt                                                                     | the command is cancelled, nothing is recorded               |
 | anything else                                                                                                      | ignored                                                     |
 
 Plain chat messages are never scanned for sport keywords — mentioning a run in conversation used to
 log a workout by mistake, so an activity is only recorded through `/sport` or a reply to its prompt.
+
+Deleting is a real delete: the row disappears from the tab, so every total and the weekly report
+are right again immediately. Only the author of an entry can delete it.
 
 You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target` and `active` there can be edited by hand and are preserved; `daily_kcal_target` is also set from the chat with `/target 2000` (`/ціль 2000`) and cleared with `/target стоп`. It is optional: without it the bot just counts, with it every food reply, `/kcal` and `/today` show `(ціль N)`.
 
