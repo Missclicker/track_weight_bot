@@ -16,6 +16,7 @@ from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.types import ErrorEvent, Message
 
 from bot import i18n
+from bot.ai import QuotaExceeded
 from bot.config import Settings
 from bot.sheets import SheetsRepo, User
 
@@ -134,11 +135,24 @@ async def on_error(event: ErrorEvent) -> None:
     This only runs when a handler matched the message and raised, so the sender was always
     waiting for a reaction (a weight or correction that silently fails would look "saved").
     """
-    log.exception("handler failed: %s", event.exception)
+    exception = event.exception
+    if isinstance(exception, QuotaExceeded):
+        # WARNING, not a traceback: a spent Gemini quota is an expected, self-healing condition
+        # of the free tier, and it gets a message that says what the user can still do.
+        log.warning(
+            "Gemini %s is out of quota for another %.0f s (daily=%s)",
+            exception.model,
+            exception.retry_after_s,
+            exception.daily,
+        )
+        text = i18n.quota_notice(vision=exception.vision, daily=exception.daily)
+    else:
+        log.exception("handler failed: %s", exception)
+        text = i18n.ERROR_TRY_AGAIN
     message = event.update.message
     if message is None:
         return
     try:
-        await message.reply(i18n.ERROR_TRY_AGAIN)
+        await message.reply(text)
     except Exception:
         log.exception("could not send error reply")

@@ -21,7 +21,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
 | `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `parse_kcal_target`, `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
-| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food`, `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below). |
+| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*). |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
 | `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies), `today_summary` and `build_weekly_payload` (the JSON given to Gemini). |
@@ -56,8 +56,8 @@ Inside `guarded` the routers are tried in order:
    `parsing.is_delete_request` accepts a delete verb plus filler words only ("видали цей
    запис"), so "прибери хліб" - drop an ingredient from the estimate - stays a correction
    of the dish. Any other text -> `get_food_entry`,
-   re-download the photo by its stored `file_id` (if any), `GeminiClient.revise_food` with the
-   earlier estimate + the user's text -> new `≈` reply -> `update_food_entry`, which also re-keys
+   `GeminiClient.revise_food` with the earlier estimate + the user's text - text model only, the
+   photo is never re-sent -> new `≈` reply -> `update_food_entry`, which also re-keys
    the row to the new reply's `message_id` so corrections can be chained. All three are scoped to
    the sender, so only the author of an entry can correct or delete it and equal `message_id`s from
    different groups never collide. All three replies end with the total for the day the entry
@@ -123,22 +123,45 @@ hours can never succeed. Each attempt therefore passes its own `types.HttpOption
 `GenerateContentConfig`; per-request options win over the client-level ones in the SDK and drive
 both the transport timeout and that header. The outer `asyncio.wait_for` keeps a `_TIMEOUT_GRACE_S`
 margin over the attempt's deadline so it stays a backstop and the SDK's informative error surfaces
-first. Retried: transient API codes (408/429/5xx), an empty response body, and aiohttp/httpx
+first. Retried: transient API codes (408/5xx), an empty response body, and aiohttp/httpx
 transport failures (both arrive transitively, so the imports are guarded); 400/403/404 break out
 after one attempt - a bad key or a retired model will not fix itself.
+
+**Gemini quota.** A 429 is *not* transient: it means the model's free-tier budget is spent, so
+`_generate` puts that **model** into a cooldown (`GeminiClient._cooldowns`) and raises
+`QuotaExceeded` at once, without a second attempt and without the "retrying" notice - another
+request would only burn another unit of the same counter. The cooldown is per model on purpose:
+the vision model's requests-per-day runs out long before the text one's, and `/їжа <текст>`,
+`/спорт`, corrections and the weekly report must keep working when photos no longer do. Its
+length comes from the pure `quota_cooldown(details)`, which reads the 429 body: a
+`google.rpc.QuotaFailure` whose `quotaId`/`quotaMetric` mentions "per day" means waiting for the
+next midnight in `America/Los_Angeles` (where Google resets the daily counters), anything else
+uses the `google.rpc.RetryInfo` `retryDelay`, floored at 30 s (a 1 s delay would make the cooldown
+pointless) and defaulted to 60 s. Not every 429 carries either part, so the parser never raises
+and falls through to that default. The register is in memory only: a restart forgets it and the
+next 429 simply re-arms it. `check_quota` is called at the top of every attempt (a concurrent call
+may have armed the cooldown while this one slept) and, ahead of everything else, by
+`photos.on_photo` - a photo download and a Sheets read are not worth paying for just to learn the
+vision quota is gone. The user gets one of four Ukrainian messages (`i18n.quota_notice`, chosen by
+*which* model ran out and *whether* it was a per-day limit); the photo ones point at `/їжа
+<текст>`, which still works. `scheduler.run_weekly_report` needs no change: it already catches
+`Exception` around the Gemini call and degrades to the numbers-only fallback.
 
 The four public methods take an optional `on_retry` callback that fires *once* per call, just
 before the first backoff sleep. The interactive call sites (`photos.on_photo`,
 `commands._record_food_text`, `corrections.on_text_correction`, `sport.record_sport`) pass
 `partial(message.reply, i18n.AI_RETRYING)`, so somebody waiting on a slow estimate is told the
 answer is late instead of staring at silence; the notice is left in the chat. Its wording names no
-cause, because the same notice covers a deadline, a 429 and a dropped connection. A send that fails is
+cause, because the same notice covers a deadline, a 5xx and a dropped connection. A send that fails is
 logged and the retry continues. `scheduler.run_weekly_report` passes no callback: nobody waits on
 a background job and it already degrades to the numbers-only fallback.
 
 **Errors.** A global error handler logs the exception and replies with a short "не вийшло,
-спробуй ще" (it only fires when a handler matched, so the sender was always waiting). The
-polling loop never dies because of a handler.
+спробуй ще" (it only fires when a handler matched, so the sender was always waiting). One
+exception is special-cased: `ai.QuotaExceeded` gets its own message (`i18n.quota_notice`) and a
+WARNING-level log line with the model and the cooldown instead of a traceback - a spent free-tier
+quota is an expected, self-healing condition, not a bug to hunt. The polling loop never dies
+because of a handler.
 
 **Trailing columns.** `food.portion` (the portion size the model priced, shown on the `≈` line so
 the user can see what the calories were computed for) and `sport.message_id` (the confirmation a

@@ -553,8 +553,9 @@ class SheetsRepo:
         message_id: int,
         photo_file_id: str = "",
     ) -> None:
-        # `photo_file_id` is Telegram's handle for the photo (only this bot can use it); it lets a
-        # later free-text correction show the photo to the model again.
+        # `photo_file_id` is Telegram's handle for the photo (only this bot can use it), kept in
+        # the sheet as a reference to the original. Nothing reads it back today: a free-text
+        # correction is revised from the earlier estimate alone, without the pixels.
         row = [
             when.isoformat(timespec="seconds"),
             when.date().isoformat(),

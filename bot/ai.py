@@ -3,6 +3,11 @@
 Three jobs: estimate food from a photo or text, parse a sport sentence, write the weekly report.
 Structured outputs use `response_mime_type="application/json"` with a pydantic schema, so the
 model's answer is validated (and clamped) before it reaches a handler.
+
+A failed call is retried (see `_generate`), with one exception: a 429 means the model's quota is
+spent, so the model is put into a cooldown and `QuotaExceeded` is raised at once. The cooldown is
+per model, because on the free tier the vision model's daily budget runs out long before the text
+one's - and text must keep working when photos no longer do.
 """
 
 from __future__ import annotations
@@ -10,8 +15,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from google import genai
 from google.genai import errors as genai_errors
@@ -31,8 +40,22 @@ _RETRY_DELAYS_S = (1.5, 3.0)  # one per gap between attempts
 # The outer `asyncio.wait_for` must lose the race against the SDK's own deadline, otherwise a bare
 # client-side TimeoutError masks the server's informative 504. It stays only as a backstop.
 _TIMEOUT_GRACE_S = 5.0
-_TRANSIENT_CODES = frozenset({408, 429, 500, 502, 503, 504})
+# 429 is deliberately absent: a spent quota is not transient within one call, and the quota path
+# in `_generate` owns it (cooldown + `QuotaExceeded`, never a retry).
+_TRANSIENT_CODES = frozenset({408, 500, 502, 503, 504})
 _MAX_PORTION_CHARS = 40
+
+# Used when a 429 carries no `RetryInfo` at all: long enough to stop a burst, short enough that a
+# per-minute limit is forgiven within the same conversation.
+_QUOTA_COOLDOWN_DEFAULT_S = 60.0
+# Google's per-minute `retryDelay` can be a second or two, which would make the cooldown pointless
+# (the next photo arrives later than that anyway) and let the bot burn the daily budget on retries.
+_QUOTA_COOLDOWN_MIN_S = 30.0
+# Nothing is ever worth waiting more than a day for: the per-day quotas reset in this tz.
+_QUOTA_COOLDOWN_MAX_S = 24 * 3600.0
+# Free-tier requests-per-day counters reset at midnight Pacific, not at the user's midnight.
+_QUOTA_RESET_TZ = ZoneInfo("America/Los_Angeles")
+_NON_ALNUM = re.compile(r"[^a-z0-9]")
 
 # aiohttp and httpx both arrive transitively (aiogram / google-genai) rather than as declared
 # dependencies, and the SDK picks its transport at runtime, so neither import is guaranteed:
@@ -66,6 +89,95 @@ _RETRYABLE: tuple[type[Exception], ...] = (
 # Called at most once per public call, just before the first backoff sleep, so an interactive
 # call site can tell the user the answer is late. The result is ignored.
 RetryNotice = Callable[[], Awaitable[Any]]
+
+
+class QuotaExceeded(RuntimeError):
+    """Gemini refused because this model's quota is spent (429), or the model is still inside
+    the cooldown an earlier 429 started."""
+
+    def __init__(self, model: str, retry_after_s: float, daily: bool, vision: bool) -> None:
+        super().__init__(
+            f"Gemini quota exhausted for {model} (daily={daily}), retry in {retry_after_s:.0f}s"
+        )
+        self.model = model
+        self.retry_after_s = retry_after_s
+        self.daily = daily
+        # Carried on the exception so the global error handler can word the reply without being
+        # handed the client: only a photo needs the vision model, and text still works without it.
+        self.vision = vision
+
+
+def _error_details(details: Any) -> list[dict[str, Any]]:
+    """The `error.details` list of a Google API error body, or [] for anything else.
+
+    `APIError.details` is whatever the response body parsed into, so it may be a list, a string
+    or None when the failure happened outside the normal error format.
+    """
+    if not isinstance(details, dict):
+        return []
+    error = details.get("error")
+    if not isinstance(error, dict):
+        return []
+    items = error.get("details")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _is_per_day(violation: dict[str, Any]) -> bool:
+    """True if this quota violation is about a per-day budget rather than a per-minute one."""
+    for key in ("quotaId", "quotaMetric"):
+        value = violation.get(key)
+        # The identifiers are camel-case and dotted ("GenerateRequestsPerDayPerProjectPerModel",
+        # ".../generate_content_free_tier_requests"), so compare on letters and digits only.
+        if isinstance(value, str) and "perday" in _NON_ALNUM.sub("", value.lower()):
+            return True
+    return False
+
+
+def _duration_s(value: Any) -> float | None:
+    """Parse a protobuf duration string like "25s" or "1.5s" (a bare number is accepted too)."""
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float, str)):
+        return None
+    try:
+        seconds = float(str(value).strip().removesuffix("s"))
+    except ValueError:
+        return None
+    # Also rejects NaN, which would poison every comparison downstream.
+    return seconds if 0 <= seconds <= _QUOTA_COOLDOWN_MAX_S else None
+
+
+def quota_cooldown(details: Any, now: datetime | None = None) -> tuple[float, bool]:
+    """How long to keep a model out of use after a 429, and whether it was a per-day quota.
+
+    `details` is `APIError.details`, i.e. an arbitrary parsed JSON body: a 429 may carry a
+    `QuotaFailure`, a `RetryInfo`, both or neither, so nothing here may raise. `now` exists so
+    tests can pin the clock.
+    """
+    retry_delay: float | None = None
+    daily = False
+    for entry in _error_details(details):
+        kind = str(entry.get("@type", ""))
+        if kind.endswith("google.rpc.QuotaFailure"):
+            violations = entry.get("violations")
+            if isinstance(violations, list):
+                daily = daily or any(_is_per_day(v) for v in violations if isinstance(v, dict))
+        elif kind.endswith("google.rpc.RetryInfo"):
+            retry_delay = _duration_s(entry.get("retryDelay"))
+    if daily:
+        # A per-day counter does not trickle back: it resets at midnight Pacific, and any
+        # `retryDelay` next to it (Google sends a per-minute one) would wake us far too early.
+        if now is None:
+            now = datetime.now(_QUOTA_RESET_TZ)
+        local = (
+            now.astimezone(_QUOTA_RESET_TZ) if now.tzinfo else now.replace(tzinfo=_QUOTA_RESET_TZ)
+        )
+        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        seconds = (midnight - local).total_seconds()
+        return min(max(seconds, _QUOTA_COOLDOWN_MIN_S), _QUOTA_COOLDOWN_MAX_S), True
+    return max(retry_delay or _QUOTA_COOLDOWN_DEFAULT_S, _QUOTA_COOLDOWN_MIN_S), False
 
 
 class FoodEstimate(BaseModel):
@@ -166,7 +278,7 @@ FOOD_PROMPT = (
 
 REVISE_PROMPT = (
     "You are a nutrition assistant for a Ukrainian friend group tracking calories. "
-    "An earlier estimate of a meal{source} is given below as JSON, followed by the user's "
+    "An earlier estimate of a meal is given below as JSON, followed by the user's "
     "correction: typically a different portion weight, a missing or wrong ingredient, or another "
     "dish name. Produce a revised estimate for the whole portion that applies the correction and "
     "keeps everything the user did not mention consistent with the earlier estimate. "
@@ -237,6 +349,30 @@ class GeminiClient:
         )
         self._vision_model = vision_model
         self._text_model = text_model
+        # model -> (`time.monotonic()` deadline, per-day flag). In memory on purpose: a restart
+        # forgets the cooldown, and if the quota really is still spent the next call's 429
+        # simply re-arms it - one wasted request beats persisting state we cannot verify.
+        self._cooldowns: dict[str, tuple[float, bool]] = {}
+
+    @property
+    def vision_model(self) -> str:
+        return self._vision_model
+
+    @property
+    def text_model(self) -> str:
+        return self._text_model
+
+    def check_quota(self, model: str) -> None:
+        """Raise `QuotaExceeded` while `model` is cooling down after a 429; else return None."""
+        cooldown = self._cooldowns.get(model)
+        if cooldown is None:
+            return
+        deadline, daily = cooldown
+        left = deadline - time.monotonic()
+        if left <= 0:
+            del self._cooldowns[model]
+            return
+        raise QuotaExceeded(model, left, daily, model == self._vision_model)
 
     async def _generate(
         self,
@@ -257,6 +393,9 @@ class GeminiClient:
         last_exc: Exception | None = None
         notified = False
         for attempt, deadline in enumerate(_ATTEMPT_TIMEOUTS_S):
+            # Re-checked every attempt, not just the first: a concurrent call may have armed the
+            # cooldown while this one was sleeping between attempts.
+            self.check_quota(model)
             # Per-request http options win over the client-level ones (`patch_http_options` in the
             # SDK), and the merged value drives both the transport timeout and `X-Server-Timeout`.
             config.http_options = types.HttpOptions(timeout=int(deadline * 1000))
@@ -272,6 +411,21 @@ class GeminiClient:
                 return response.text
             except _RETRYABLE as exc:
                 last_exc = exc
+                # A 429 arrives as `ClientError`, so match on the code rather than on the class.
+                # It is never retried and never triggers the `on_retry` notice: retrying a spent
+                # quota only burns another request, and the per-minute variant asks for ~30 s -
+                # far longer than our 1.5 s backoff.
+                if isinstance(exc, genai_errors.APIError) and exc.code == 429:
+                    seconds, daily = quota_cooldown(exc.details)
+                    self._cooldowns[model] = (time.monotonic() + seconds, daily)
+                    log.warning(
+                        "Gemini %s is out of quota (daily=%s), cooling down for %.0f s: %s",
+                        model,
+                        daily,
+                        seconds,
+                        exc,
+                    )
+                    raise QuotaExceeded(model, seconds, daily, model == self._vision_model) from exc
                 log.warning("Gemini %s failed (attempt %d): %s", model, attempt + 1, exc)
                 if isinstance(exc, genai_errors.APIError) and exc.code not in _TRANSIENT_CODES:
                     break  # 400/403/404: bad key or retired model - retrying won't help
@@ -317,13 +471,17 @@ class GeminiClient:
 
     async def revise_food(
         self,
-        image_bytes: bytes | None,
-        mime: str | None,
         previous: dict[str, Any],
         correction: str,
         on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
-        """Re-estimate a meal after the user corrected it in free text (weight, ingredients...)."""
+        """Re-estimate a meal after the user corrected it in free text (weight, ingredients...).
+
+        Always the text model, even for an entry that came from a photo: the earlier estimate JSON
+        already carries the model's own reading of the plate, so a correction ("це 300 г", "без
+        хліба", "це солянка, а не борщ") does not need the pixels - and re-sending the image would
+        cost a whole request against the scarce vision per-day quota.
+        """
         fields = (
             "dish",
             "portion",
@@ -335,21 +493,8 @@ class GeminiClient:
             "veg_share",
         )
         earlier = json.dumps({k: previous.get(k) for k in fields}, ensure_ascii=False)
-        if image_bytes is not None:
-            prompt = REVISE_PROMPT.format(
-                source=" shown in the photo", previous=earlier, correction=correction.strip()
-            )
-            contents: list[Any] = [
-                types.Part.from_bytes(data=image_bytes, mime_type=mime or "image/jpeg"),
-                prompt,
-            ]
-            model = self._vision_model
-        else:
-            contents = [
-                REVISE_PROMPT.format(source="", previous=earlier, correction=correction.strip())
-            ]
-            model = self._text_model
-        raw = await self._generate(model, contents, FoodEstimate, on_retry)
+        prompt = REVISE_PROMPT.format(previous=earlier, correction=correction.strip())
+        raw = await self._generate(self._text_model, [prompt], FoodEstimate, on_retry)
         return FoodEstimate.model_validate_json(raw)
 
     async def parse_sport(

@@ -18,11 +18,11 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.methods import TelegramMethod
 from aiogram.methods.base import TelegramType
-from aiogram.types import Chat, Message, Update
+from aiogram.types import Chat, Message, PhotoSize, Update
 from aiogram.types import User as TgUser
 
 from bot import i18n
-from bot.ai import FoodEstimate, RetryNotice, SportEntry
+from bot.ai import FoodEstimate, QuotaExceeded, RetryNotice, SportEntry
 from bot.config import Settings
 from bot.handlers import build_router
 from bot.scheduler import user_now
@@ -88,8 +88,24 @@ class MockSession(BaseSession):
 class FakeAI:
     def __init__(self) -> None:
         self.sport_calls: list[str] = []
-        self.revise_calls: list[tuple[bool, str, str]] = []
+        self.revise_calls: list[tuple[str, str]] = []
+        self.estimate_calls: list[str | None] = []  # the caption of every estimate_food call
         self.food_estimates: list[FoodEstimate] = []  # answers for estimate_food, in order
+        self.cooling: dict[str, tuple[float, bool]] = {}  # model -> (seconds left, per-day)
+
+    @property
+    def vision_model(self) -> str:
+        return "vision-model"
+
+    @property
+    def text_model(self) -> str:
+        return "text-model"
+
+    def check_quota(self, model: str) -> None:
+        cooldown = self.cooling.get(model)
+        if cooldown is not None:
+            seconds, daily = cooldown
+            raise QuotaExceeded(model, seconds, daily, model == self.vision_model)
 
     # `on_retry` is never invoked here - the retry loop itself is covered by `test_ai_retry.py`
     # and, end to end, by `test_food_estimate_warns_the_user_before_retrying` below. These fakes
@@ -101,22 +117,25 @@ class FakeAI:
         caption: str | None,
         on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
+        # the real client checks the quota inside `_generate`, for whichever model it picks
+        self.check_quota(self.vision_model if image_bytes is not None else self.text_model)
+        self.estimate_calls.append(caption)
         return self.food_estimates.pop(0)
 
     async def revise_food(
         self,
-        image: bytes | None,
-        mime: str | None,
         previous: dict[str, Any],
         correction: str,
         on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
-        self.revise_calls.append((image is not None, str(previous["dish"]), correction))
+        self.check_quota(self.text_model)
+        self.revise_calls.append((str(previous["dish"]), correction))
         return FoodEstimate(dish="борщ з хлібом", kcal=720, carbs_g=60)
 
     async def parse_sport(
         self, text: str, weight_kg: float | None, on_retry: RetryNotice | None = None
     ) -> SportEntry | None:
+        self.check_quota(self.text_model)
         self.sport_calls.append(text)
         return SportEntry(activity="running", title="біг", minutes=30, distance_km=5, kcal=390)
 
@@ -162,6 +181,20 @@ def _update(
             from_user=TgUser(id=ME, is_bot=False, first_name="Олексій", username="ol"),
             text=text,
             reply_to_message=reply_to,
+        ),
+    )
+
+
+def _photo_update(caption: str | None = None, message_id: int = 1) -> Update:
+    return Update(
+        update_id=message_id,
+        message=Message(
+            message_id=message_id,
+            date=datetime.now(),
+            chat=Chat(id=CHAT_ID, type="supergroup"),
+            from_user=TgUser(id=ME, is_bot=False, first_name="Олексій", username="ol"),
+            photo=[PhotoSize(file_id="f1", file_unique_id="u1", width=800, height=600)],
+            caption=caption,
         ),
     )
 
@@ -237,7 +270,7 @@ async def test_text_reply_to_food_estimate_revises_via_ai(harness, repo: FakeRep
     food_msg = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 777)
 
     await dp.feed_update(bot, _update("плюс два шматки хліба, потім біг", reply_to=food_msg))
-    assert ai.revise_calls == [(False, "борщ", "плюс два шматки хліба, потім біг")]
+    assert ai.revise_calls == [("борщ", "плюс два шматки хліба, потім біг")]
     assert ai.sport_calls == []
     row = repo.rows["food"][0]
     assert (row["dish"], row["kcal"], row["corrected"]) == ("борщ з хлібом", 720, "TRUE")
@@ -429,6 +462,39 @@ async def test_handler_error_is_reported_not_raised(harness, repo: FakeRepo) -> 
     ai.parse_sport = boom  # type: ignore[method-assign]
     await dp.feed_update(bot, _update("/sport біг 30 хв"))
     assert session.sent[-1]["text"] == i18n.ERROR_TRY_AGAIN
+
+
+@pytest.mark.parametrize(
+    ("daily", "expected"),
+    [(True, i18n.AI_QUOTA_PHOTO_DAY), (False, i18n.AI_QUOTA_PHOTO_SOON)],
+)
+async def test_a_photo_is_refused_while_the_vision_quota_is_spent(
+    harness, repo: FakeRepo, daily: bool, expected: str
+) -> None:
+    """`MockSession` only answers `sendMessage`, so a download would blow the test up - which is
+    exactly the point: the handler must bail out before it costs us anything."""
+    dp, bot, session, ai = harness
+    ai.cooling[ai.vision_model] = (7200.0, daily)
+    await dp.feed_update(bot, _photo_update(caption="борщ"))
+    assert session.sent[-1]["text"] == expected
+    assert ai.estimate_calls == []
+    assert repo.rows["food"] == []
+
+
+async def test_a_correction_is_refused_while_the_text_quota_is_spent(
+    harness, repo: FakeRepo
+) -> None:
+    dp, bot, session, ai = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій")
+    await repo.add_food(me, FoodEstimate(dish="борщ", kcal=600), datetime.now(), "photo", 11)
+    borsch = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 11)
+    ai.cooling[ai.text_model] = (7200.0, True)
+
+    await dp.feed_update(bot, _update("це було 300 г", reply_to=borsch))
+    assert session.sent[-1]["text"] == i18n.AI_QUOTA_DAY
+    assert ai.revise_calls == []
+    row = repo.rows["food"][0]
+    assert (row["dish"], row["kcal"], row["corrected"]) == ("борщ", 600, "FALSE")
 
 
 async def test_food_estimate_warns_the_user_before_retrying(
@@ -666,8 +732,9 @@ async def test_a_delete_verb_with_an_ingredient_is_still_a_correction(harness, r
 
     await dp.feed_update(bot, _update("прибери хліб", reply_to=borsch))
     assert len(repo.rows["food"]) == 1  # still there, re-estimated rather than deleted
-    # (no image: the row carries no photo_file_id, so the revision is text-only)
-    assert ai.revise_calls == [(False, "борщ", "прибери хліб")]
+    # a correction is always text-only: the earlier estimate goes back to the model, the photo
+    # never does (that would cost a request against the scarce vision quota)
+    assert ai.revise_calls == [("борщ", "прибери хліб")]
 
 
 async def test_deleting_someone_elses_food_row_is_refused(harness, repo: FakeRepo, user):

@@ -2,16 +2,13 @@
 
 A number replaces the kcal value directly. A delete word ("видали") throws the row away. Any
 other text ("це 300 г", "без хліба", "це солянка, а не борщ") goes to Gemini together with the
-earlier estimate - and the original photo when the entry came from one - and the whole row is
-re-estimated.
+earlier estimate - text only, never the original photo - and the whole row is re-estimated.
 """
 
 from __future__ import annotations
 
-import logging
 from datetime import date
 from functools import partial
-from io import BytesIO
 from typing import Literal
 
 from aiogram import Bot, Router
@@ -27,7 +24,6 @@ from bot.reports import day_food
 from bot.scheduler import user_now
 from bot.sheets import SheetsRepo, User
 
-log = logging.getLogger(__name__)
 _MAX_CORRECTION_TEXT = 500
 
 
@@ -105,7 +101,6 @@ async def on_delete(message: Message, repo: SheetsRepo, settings: Settings) -> N
 async def on_text_correction(
     message: Message,
     correction_text: str,
-    bot: Bot,
     repo: SheetsRepo,
     ai: GeminiClient,
     settings: Settings,
@@ -116,13 +111,8 @@ async def on_text_correction(
     if entry is None:
         await message.reply(i18n.CORRECTION_NOT_FOUND)
         return
-    image = await _download_photo(bot, entry.get("photo_file_id") or "")
     est = await ai.revise_food(
-        image,
-        "image/jpeg",
-        entry,
-        correction_text,
-        on_retry=partial(message.reply, i18n.AI_RETRYING),
+        entry, correction_text, on_retry=partial(message.reply, i18n.AI_RETRYING)
     )
     if not est.is_food:
         await message.reply(i18n.CORRECTION_NOT_UNDERSTOOD)
@@ -149,18 +139,6 @@ async def on_text_correction(
     )
     # the row is re-keyed to the new reply, so the next correction replies to the latest estimate
     await repo.update_food_entry(message.from_user.id, original_id, est, reply.message_id)
-
-
-async def _download_photo(bot: Bot, file_id: str) -> bytes | None:
-    if not file_id:
-        return None
-    buffer = BytesIO()
-    try:
-        await bot.download(file_id, destination=buffer)
-    except Exception:  # stale file id: fall back to a text-only revision rather than failing
-        log.warning("could not re-download photo %s, revising from text only", file_id)
-        return None
-    return buffer.getvalue()
 
 
 def build() -> Router:

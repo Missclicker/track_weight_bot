@@ -278,6 +278,9 @@ def _gemini() -> ai.GeminiClient:
 def client_with(outcomes: list[Any]) -> tuple[ai.GeminiClient, FakeModels]:
     """A `GeminiClient` whose SDK call answers `outcomes` in order, plus the recorder."""
     client = _gemini()
+    # The one cached client is shared by the whole suite, so a quota cooldown armed by one test
+    # would silence the next one's calls. Start every test with an empty register.
+    client._cooldowns.clear()
     models = FakeModels(outcomes)
     client._client = _Client(models)  # type: ignore[assignment]
     return client, models
@@ -287,8 +290,11 @@ def server_error(code: int = 504) -> genai_errors.APIError:
     return genai_errors.ServerError(code, {"error": {"status": "DEADLINE_EXCEEDED"}})
 
 
-def client_error(code: int) -> genai_errors.APIError:
-    return genai_errors.ClientError(code, {"error": {"status": "INVALID_ARGUMENT"}})
+def client_error(code: int, details: Any | None = None) -> genai_errors.APIError:
+    """A `ClientError` with `code`; `details` replaces the default (unparsed) error body."""
+    return genai_errors.ClientError(
+        code, details if details is not None else {"error": {"status": "INVALID_ARGUMENT"}}
+    )
 
 
 @pytest.fixture

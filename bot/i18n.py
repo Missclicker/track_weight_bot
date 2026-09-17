@@ -55,8 +55,31 @@ START_REGISTERED = "Записав тебе, {name}. Щоранку до {deadli
 
 ERROR_TRY_AGAIN = "Не вийшло, спробуй ще раз."
 # Sent once mid-call, when a Gemini attempt failed and a longer one is starting. Deliberately
-# says nothing about *why*: the same notice covers a deadline, a 429 and a dropped connection.
+# says nothing about *why*: the same notice covers a deadline, a 5xx and a dropped connection.
 AI_RETRYING = "AI не відповів, пробую ще раз."
+
+# Two axes decide what to say when Gemini answers 429: *which* model ran out (only photos need the
+# vision one, and describing the meal in text still works without it) and *how long* it is gone
+# (a per-day quota is back tomorrow, a per-minute one within a minute). No duration is
+# interpolated: "за хвилину" reads right for any short cooldown, and a wrong count of minutes
+# would be worse than none.
+AI_QUOTA_PHOTO_DAY = (
+    "Ліміт AI на фото вичерпано на сьогодні. Опиши їжу текстом: /їжа борщ і два шматки хліба."
+)
+AI_QUOTA_PHOTO_SOON = (
+    "Забагато запитів до AI. Спробуй надіслати фото ще раз за хвилину "
+    "або опиши їжу текстом: /їжа борщ і два шматки хліба."
+)
+AI_QUOTA_DAY = "Ліміт AI вичерпано на сьогодні. Спробуй завтра."
+AI_QUOTA_SOON = "Забагато запитів до AI. Спробуй ще раз за хвилину."
+
+
+def quota_notice(vision: bool, daily: bool) -> str:
+    """The message for a spent Gemini quota: `vision` is the photo path, `daily` the per-day one."""
+    if vision:
+        return AI_QUOTA_PHOTO_DAY if daily else AI_QUOTA_PHOTO_SOON
+    return AI_QUOTA_DAY if daily else AI_QUOTA_SOON
+
 
 WEIGHT_USAGE = "Напиши вагу так: /w 84.3"
 WEIGHT_OUT_OF_RANGE = "Це не схоже на вагу. Очікую число від {lo:g} до {hi:g} кг."

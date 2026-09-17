@@ -58,11 +58,21 @@ async def test_outer_wait_has_a_grace_margin_over_every_deadline(
 
 async def test_three_transient_failures_raise_the_last_one() -> None:
     last = server_error(503)
-    client, models = client_with([server_error(), server_error(429), last])
+    client, models = client_with([server_error(), server_error(500), last])
     with pytest.raises(genai_errors.APIError) as excinfo:
         await client._generate("m", ["hi"], None)
     assert excinfo.value is last
     assert models.calls == 3
+
+
+async def test_a_429_is_not_transient() -> None:
+    """A spent quota gets a cooldown instead (see `test_ai_quota.py`); retrying only burns
+    another request against the same counter."""
+    client, models = client_with([client_error(429), "never reached"])
+    with pytest.raises(ai.QuotaExceeded):
+        await client._generate("m", ["hi"], None)
+    assert models.calls == 1
+    assert 429 not in ai._TRANSIENT_CODES
 
 
 async def test_408_is_transient() -> None:
