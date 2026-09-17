@@ -21,7 +21,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
 | `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `parse_kcal_target`, `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
-| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*). |
+| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
 | `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies), `today_summary` and `build_weekly_payload` (the JSON given to Gemini). |
@@ -146,24 +146,56 @@ may have armed the cooldown while this one slept) and, ahead of everything else,
 `photos.on_photo` - a photo download and a Sheets read are not worth paying for just to learn the
 vision quota is gone. The user gets one of four Ukrainian messages (`i18n.quota_notice`, chosen by
 *which* model ran out and *whether* it was a per-day limit); the photo ones point at `/їжа
-<текст>`, which still works - unless `GEMINI_VISION_MODEL` and `GEMINI_TEXT_MODEL` name the
-same model, in which case `_is_vision_outage` drops that advice, because text is equally gone. `scheduler.run_weekly_report` needs no change: it already catches
+<текст>`, which still works - unless the text model is unusable too, in which case
+`_is_vision_only_outage` drops that advice: either both env vars name the same model, or the text
+model is itself out of quota or riding out a demand spike (see *Gemini overload*).
+`scheduler.run_weekly_report` needs no change: it already catches
 `Exception` around the Gemini call and degrades to the numbers-only fallback.
 
-The four public methods take an optional `on_retry` callback that fires *once* per call, just
-before the first backoff sleep. The interactive call sites (`photos.on_photo`,
+**Gemini overload.** A 503 ("this model is currently experiencing high demand") *is* transient, so
+it stays in `_TRANSIENT_CODES` and the first retry still happens - but the ladder stops there
+(`_OVERLOAD_MAX_ATTEMPTS`, 2, clamped to the ladder's own length so shortening `_ATTEMPT_TIMEOUTS_S`
+cannot put the budget out of reach and switch this whole path off). The escalation exists to give a
+slow backend a longer deadline, and an overloaded model refuses immediately instead of running long,
+so attempt three could only repeat the refusal - at the price of ~28 s of somebody staring at a
+photo they just sent. The "retrying" notice is skipped too: the whole call is over in about two
+seconds, and `i18n.AI_RETRYING` followed straight away by the overload reply is two messages for
+nothing (a notice already sent because of an earlier non-503 failure in the same call stays).
+Detection is `APIError.code == 503` only, never the response text: the wording and its locale are
+not a contract. When it gives up, `_generate` sets the model aside for `_OVERLOAD_COOLDOWN_S` (30 s
+- long enough that the next photo in the same spike does not pay the retry budget again, short
+enough that a spike which clears in seconds is forgiven inside the same conversation), logs its own
+WARNING naming the cooldown - checked ahead of the per-attempt log line, so a give-up reads as one
+event rather than a bare "attempt 2 failed" the reader has to join up - and raises
+`ModelOverloaded`. The register (`GeminiClient._overloads`) is deliberately *separate* from
+`_cooldowns`: a spent quota and a busy model are different conditions with different replies, and a
+quota can be gone for the rest of the day. Like `_cooldowns` it lives in memory only - 30 s of state
+is not worth persisting across a restart. `check_overload` mirrors `check_quota` exactly: at the top
+of every attempt, and ahead of the download in `photos.on_photo`. The reply is `i18n.busy_notice`
+(two messages, chosen by which model is busy), and its photo variant offers `/їжа <текст>` only when
+the text model is actually usable right now - not overloaded and not out of quota
+(`_is_vision_only_outage`, which the quota path shares for the same reason), because advice that
+cannot work is worse than none. `scheduler.run_weekly_report` again needs nothing: `ModelOverloaded`
+is an `Exception` and lands in the same numbers-only fallback.
+
+**The retry notice.** The four public methods take an optional `on_retry` callback that fires
+*once* per call, just before the first backoff sleep - or before the second one, when the first
+failure was a 503 and the overload path suppressed it. The interactive call sites
+(`photos.on_photo`,
 `commands._record_food_text`, `corrections.on_text_correction`, `sport.record_sport`) pass
 `partial(message.reply, i18n.AI_RETRYING)`, so somebody waiting on a slow estimate is told the
 answer is late instead of staring at silence; the notice is left in the chat. Its wording names no
-cause, because the same notice covers a deadline, a 5xx and a dropped connection. A send that fails is
+cause, because the same notice covers a deadline, a 5xx and a dropped connection. A send that fails
+is
 logged and the retry continues. `scheduler.run_weekly_report` passes no callback: nobody waits on
 a background job and it already degrades to the numbers-only fallback.
 
 **Errors.** A global error handler logs the exception and replies with a short "не вийшло,
-спробуй ще" (it only fires when a handler matched, so the sender was always waiting). One
-exception is special-cased: `ai.QuotaExceeded` gets its own message (`i18n.quota_notice`) and a
-WARNING-level log line with the model and the cooldown instead of a traceback - a spent free-tier
-quota is an expected, self-healing condition, not a bug to hunt. The polling loop never dies
+спробуй ще" (it only fires when a handler matched, so the sender was always waiting). Two
+exceptions from `bot/ai.py` are special-cased: `QuotaExceeded` gets `i18n.quota_notice` and
+`ModelOverloaded` gets `i18n.busy_notice`, each with a WARNING-level log line naming the model and
+the cooldown instead of a traceback - a spent free-tier quota and a demand spike are expected,
+self-healing conditions, not bugs to hunt. The polling loop never dies
 because of a handler.
 
 **Trailing columns.** `food.portion` (the portion size the model priced, shown on the `≈` line so

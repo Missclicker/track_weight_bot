@@ -57,7 +57,9 @@ async def test_outer_wait_has_a_grace_margin_over_every_deadline(
 
 
 async def test_three_transient_failures_raise_the_last_one() -> None:
-    last = server_error(503)
+    # No 503 anywhere in the ladder: that code leaves after two attempts with `ModelOverloaded`
+    # instead of the raw error (see `test_ai_overload.py`), so it cannot stand in for "transient".
+    last = server_error(502)
     client, models = client_with([server_error(), server_error(500), last])
     with pytest.raises(genai_errors.APIError) as excinfo:
         await client._generate("m", ["hi"], None)

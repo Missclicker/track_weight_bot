@@ -4,10 +4,12 @@ Three jobs: estimate food from a photo or text, parse a sport sentence, write th
 Structured outputs use `response_mime_type="application/json"` with a pydantic schema, so the
 model's answer is validated (and clamped) before it reaches a handler.
 
-A failed call is retried (see `_generate`), with one exception: a 429 means the model's quota is
-spent, so the model is put into a cooldown and `QuotaExceeded` is raised at once. The cooldown is
-per model, because on the free tier the vision model's daily budget runs out long before the text
-one's - and text must keep working when photos no longer do.
+A failed call is retried (see `_generate`), with two exceptions. A 429 means the model's quota is
+spent, so the model is put into a cooldown and `QuotaExceeded` is raised at once. A 503 means the
+model is overloaded: it gets at most `_OVERLOAD_MAX_ATTEMPTS` of them before the same treatment -
+a short cooldown and `ModelOverloaded`.
+Both cooldowns are per model, because on the free tier the vision model's daily budget runs out
+long before the text one's - and text must keep working when photos no longer do.
 """
 
 from __future__ import annotations
@@ -41,7 +43,9 @@ _RETRY_DELAYS_S = (1.5, 3.0)  # one per gap between attempts
 # client-side TimeoutError masks the server's informative 504. It stays only as a backstop.
 _TIMEOUT_GRACE_S = 5.0
 # 429 is deliberately absent: a spent quota is not transient within one call, and the quota path
-# in `_generate` owns it (cooldown + `QuotaExceeded`, never a retry).
+# in `_generate` owns it (cooldown + `QuotaExceeded`, never a retry). 503, by contrast, must stay
+# *in* here: the non-transient break in `_generate` runs behind the overload branch, so taking
+# 503 out would quietly turn the whole `ModelOverloaded` path off rather than make it stricter.
 _TRANSIENT_CODES = frozenset({408, 500, 502, 503, 504})
 _MAX_PORTION_CHARS = 40
 
@@ -60,6 +64,19 @@ _QUOTA_COOLDOWN_MAX_S = 24 * 3600.0
 # Free-tier requests-per-day counters reset at midnight Pacific, not at the user's midnight.
 _QUOTA_RESET_TZ = ZoneInfo("America/Los_Angeles")
 _NON_ALNUM = re.compile(r"[^a-z0-9]")
+
+# How many attempts a 503 gets before the ladder is abandoned. An overloaded model refuses
+# immediately instead of thinking for too long, so handing the backend a *longer* deadline - the
+# whole point of the escalation above - cannot help it. One retry is still worth making (a spike
+# can be over a second later), but the full ladder would cost the user ~28 s of waiting for a
+# reply we are already able to word after two. Clamped to the ladder itself, so shortening
+# `_ATTEMPT_TIMEOUTS_S` can never push the budget out of reach and silently disable the whole
+# overload path.
+_OVERLOAD_MAX_ATTEMPTS = min(2, len(_ATTEMPT_TIMEOUTS_S))
+# How long an overloaded model is then set aside: long enough that the next photo in the same
+# spike does not pay the retry budget all over again, short enough that a spike which clears in
+# seconds is forgiven inside the same conversation.
+_OVERLOAD_COOLDOWN_S = 30.0
 
 # aiohttp and httpx both arrive transitively (aiogram / google-genai) rather than as declared
 # dependencies, and the SDK picks its transport at runtime, so neither import is guaranteed:
@@ -108,6 +125,20 @@ class QuotaExceeded(RuntimeError):
         self.daily = daily
         # Carried on the exception so the global error handler can word the reply without being
         # handed the client: only a photo needs the vision model, and text still works without it.
+        self.vision = vision
+
+
+class ModelOverloaded(RuntimeError):
+    """Gemini refused because this model is swamped by other people's traffic (503), or the model
+    is still inside the cooldown an earlier 503 started."""
+
+    def __init__(self, model: str, retry_after_s: float, vision: bool) -> None:
+        super().__init__(f"Gemini {model} is overloaded, retry in {retry_after_s:.0f}s")
+        self.model = model
+        self.retry_after_s = retry_after_s
+        # Same reason, and the same test (`_is_vision_only_outage`), as on `QuotaExceeded`: the
+        # error handler words the reply from the exception alone, and neither outage may offer a
+        # text fallback the other one has just taken away.
         self.vision = vision
 
 
@@ -365,6 +396,11 @@ class GeminiClient:
         # forgets the cooldown, and if the quota really is still spent the next call's 429
         # simply re-arms it - one wasted request beats persisting state we cannot verify.
         self._cooldowns: dict[str, tuple[float, bool]] = {}
+        # model -> `time.monotonic()` deadline, for 503s. Kept apart from `_cooldowns` because a
+        # spent quota and an overloaded model are different conditions with different replies (and
+        # a quota, unlike a spike, can be gone for the rest of the day). In memory for the same
+        # reason as above, and even more safely: 30 s of state is not worth a restart's attention.
+        self._overloads: dict[str, float] = {}
 
     @property
     def vision_model(self) -> str:
@@ -382,6 +418,32 @@ class GeminiClient:
         """
         return model == self._vision_model and self._vision_model != self._text_model
 
+    def _text_model_usable(self) -> bool:
+        """Whether a text estimate would go through right now.
+
+        Asked before telling the user to fall back to `/їжа <текст>`: that advice must not be
+        something that cannot work, and the same spike often takes both models. Both checks answer
+        by raising, so they are caught here - this has to answer a question, not replace the
+        outage the caller is in the middle of reporting.
+        """
+        for check in (self.check_quota, self.check_overload):
+            try:
+                check(self._text_model)
+            except (QuotaExceeded, ModelOverloaded):
+                return False
+        return True
+
+    def _is_vision_only_outage(self, model: str) -> bool:
+        """The `vision` flag both outages carry: photos are gone but text still answers.
+
+        Shared by `QuotaExceeded` and `ModelOverloaded` on purpose - either condition can be the
+        reason the text model is unavailable, and both replies point at `/їжа <текст>` when the
+        flag is set, so neither may promise a fallback the other one has just taken away.
+        """
+        # `_is_vision_outage` first, so the text model is only inspected when its state can
+        # change the wording at all (and never while reporting the text model's own outage).
+        return self._is_vision_outage(model) and self._text_model_usable()
+
     def check_quota(self, model: str) -> None:
         """Raise `QuotaExceeded` while `model` is cooling down after a 429; else return None."""
         cooldown = self._cooldowns.get(model)
@@ -392,7 +454,18 @@ class GeminiClient:
         if left <= 0:
             del self._cooldowns[model]
             return
-        raise QuotaExceeded(model, left, daily, self._is_vision_outage(model))
+        raise QuotaExceeded(model, left, daily, self._is_vision_only_outage(model))
+
+    def check_overload(self, model: str) -> None:
+        """Raise `ModelOverloaded` while `model` is cooling down after a 503; else return None."""
+        deadline = self._overloads.get(model)
+        if deadline is None:
+            return
+        left = deadline - time.monotonic()
+        if left <= 0:
+            del self._overloads[model]
+            return
+        raise ModelOverloaded(model, left, self._is_vision_only_outage(model))
 
     async def _generate(
         self,
@@ -413,9 +486,10 @@ class GeminiClient:
         last_exc: Exception | None = None
         notified = False
         for attempt, deadline in enumerate(_ATTEMPT_TIMEOUTS_S):
-            # Re-checked every attempt, not just the first: a concurrent call may have armed the
+            # Re-checked every attempt, not just the first: a concurrent call may have armed a
             # cooldown while this one was sleeping between attempts.
             self.check_quota(model)
+            self.check_overload(model)
             # Per-request http options win over the client-level ones (`patch_http_options` in the
             # SDK), and the merged value drives both the transport timeout and `X-Server-Timeout`.
             config.http_options = types.HttpOptions(timeout=int(deadline * 1000))
@@ -446,14 +520,34 @@ class GeminiClient:
                         exc,
                     )
                     raise QuotaExceeded(
-                        model, seconds, daily, self._is_vision_outage(model)
+                        model, seconds, daily, self._is_vision_only_outage(model)
+                    ) from exc
+                # A 503 stays transient (the retry below still happens), but the ladder is cut
+                # short: `attempt + 1` is how many attempts we have now *made*, so the spike is
+                # given up on as soon as that reaches the budget rather than after three 503s.
+                # Checked ahead of the per-attempt line so a give-up logs one WARNING of its own,
+                # exactly as the quota path above does.
+                overloaded = isinstance(exc, genai_errors.APIError) and exc.code == 503
+                if overloaded and attempt + 1 >= _OVERLOAD_MAX_ATTEMPTS:
+                    self._overloads[model] = time.monotonic() + _OVERLOAD_COOLDOWN_S
+                    log.warning(
+                        "Gemini %s is overloaded, cooling down for %.0f s: %s",
+                        model,
+                        _OVERLOAD_COOLDOWN_S,
+                        exc,
+                    )
+                    raise ModelOverloaded(
+                        model, _OVERLOAD_COOLDOWN_S, self._is_vision_only_outage(model)
                     ) from exc
                 log.warning("Gemini %s failed (attempt %d): %s", model, attempt + 1, exc)
                 if isinstance(exc, genai_errors.APIError) and exc.code not in _TRANSIENT_CODES:
                     break  # 400/403/404: bad key or retired model - retrying won't help
                 if attempt >= min(len(_RETRY_DELAYS_S), len(_ATTEMPT_TIMEOUTS_S) - 1):
                     break  # last attempt: never sleep on the way out
-                if on_retry is not None and not notified:
+                # No notice for a 503: the whole call is over in ~2 s, so "AI не відповів" and the
+                # overload reply right behind it would be two messages for nothing. One already
+                # sent because of an earlier non-503 failure in this call stays sent.
+                if on_retry is not None and not notified and not overloaded:
                     notified = True  # set first: one notice per public call, even if it fails
                     try:
                         await on_retry()

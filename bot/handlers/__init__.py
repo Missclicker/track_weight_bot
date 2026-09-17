@@ -16,7 +16,7 @@ from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.types import ErrorEvent, Message
 
 from bot import i18n
-from bot.ai import QuotaExceeded
+from bot.ai import ModelOverloaded, QuotaExceeded
 from bot.config import Settings
 from bot.sheets import SheetsRepo, User
 
@@ -146,6 +146,16 @@ async def on_error(event: ErrorEvent) -> None:
             exception.daily,
         )
         text = i18n.quota_notice(vision=exception.vision, daily=exception.daily)
+    elif isinstance(exception, ModelOverloaded):
+        # Same treatment as a spent quota: an overloaded model is Google's weather, not our bug,
+        # and it clears itself - so a WARNING line, no traceback, and a reply that says when to
+        # come back and what still works meanwhile.
+        log.warning(
+            "Gemini %s is overloaded for another %.0f s",
+            exception.model,
+            exception.retry_after_s,
+        )
+        text = i18n.busy_notice(vision=exception.vision)
     else:
         log.exception("handler failed: %s", exception)
         text = i18n.ERROR_TRY_AGAIN

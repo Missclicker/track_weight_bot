@@ -22,7 +22,7 @@ from aiogram.types import Chat, Message, PhotoSize, Update
 from aiogram.types import User as TgUser
 
 from bot import i18n
-from bot.ai import FoodEstimate, QuotaExceeded, RetryNotice, SportEntry
+from bot.ai import FoodEstimate, ModelOverloaded, QuotaExceeded, RetryNotice, SportEntry
 from bot.config import Settings
 from bot.handlers import build_router
 from bot.scheduler import user_now
@@ -92,6 +92,7 @@ class FakeAI:
         self.estimate_calls: list[str | None] = []  # the caption of every estimate_food call
         self.food_estimates: list[FoodEstimate] = []  # answers for estimate_food, in order
         self.cooling: dict[str, tuple[float, bool]] = {}  # model -> (seconds left, per-day)
+        self.overloaded: dict[str, float] = {}  # model -> seconds left of the 503 cooldown
 
     @property
     def vision_model(self) -> str:
@@ -107,6 +108,11 @@ class FakeAI:
             seconds, daily = cooldown
             raise QuotaExceeded(model, seconds, daily, model == self.vision_model)
 
+    def check_overload(self, model: str) -> None:
+        seconds = self.overloaded.get(model)
+        if seconds is not None:
+            raise ModelOverloaded(model, seconds, model == self.vision_model)
+
     # `on_retry` is never invoked here - the retry loop itself is covered by `test_ai_retry.py`
     # and, end to end, by `test_food_estimate_warns_the_user_before_retrying` below. These fakes
     # only have to accept the keyword the handlers now pass.
@@ -117,8 +123,10 @@ class FakeAI:
         caption: str | None,
         on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
-        # the real client checks the quota inside `_generate`, for whichever model it picks
-        self.check_quota(self.vision_model if image_bytes is not None else self.text_model)
+        # the real client runs both checks inside `_generate`, for whichever model it picks
+        model = self.vision_model if image_bytes is not None else self.text_model
+        self.check_quota(model)
+        self.check_overload(model)
         self.estimate_calls.append(caption)
         return self.food_estimates.pop(0)
 
@@ -129,6 +137,7 @@ class FakeAI:
         on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
         self.check_quota(self.text_model)
+        self.check_overload(self.text_model)
         self.revise_calls.append((str(previous["dish"]), correction))
         return FoodEstimate(dish="борщ з хлібом", kcal=720, carbs_g=60)
 
@@ -136,6 +145,7 @@ class FakeAI:
         self, text: str, weight_kg: float | None, on_retry: RetryNotice | None = None
     ) -> SportEntry | None:
         self.check_quota(self.text_model)
+        self.check_overload(self.text_model)
         self.sport_calls.append(text)
         return SportEntry(activity="running", title="біг", minutes=30, distance_km=5, kcal=390)
 
@@ -477,6 +487,18 @@ async def test_a_photo_is_refused_while_the_vision_quota_is_spent(
     ai.cooling[ai.vision_model] = (7200.0, daily)
     await dp.feed_update(bot, _photo_update(caption="борщ"))
     assert session.sent[-1]["text"] == expected
+    assert ai.estimate_calls == []
+    assert repo.rows["food"] == []
+
+
+async def test_a_photo_is_refused_while_the_vision_model_is_overloaded(
+    harness, repo: FakeRepo
+) -> None:
+    """Same bail-out as the quota case, different wording: the model is busy, not our budget."""
+    dp, bot, session, ai = harness
+    ai.overloaded[ai.vision_model] = 30.0
+    await dp.feed_update(bot, _photo_update(caption="борщ"))
+    assert session.sent[-1]["text"] == i18n.AI_BUSY_PHOTO
     assert ai.estimate_calls == []
     assert repo.rows["food"] == []
 

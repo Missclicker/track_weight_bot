@@ -285,6 +285,19 @@ async def test_a_revision_still_works_while_the_vision_quota_is_spent() -> None:
     assert models.models == [client.vision_model, client.text_model]
 
 
+async def test_the_photo_wording_is_dropped_while_the_text_model_is_overloaded() -> None:
+    """The other way `/їжа <текст>` can be dead: a spent vision quota on top of a demand spike
+    the text model is riding out. Advice that cannot work is worse than no advice, so the two
+    outages share `_is_vision_only_outage` rather than each trusting the model names alone.
+    """
+    client, _ = client_with([_daily_429()])
+    client._overloads[client.text_model] = time.monotonic() + ai._OVERLOAD_COOLDOWN_S
+    with pytest.raises(QuotaExceeded) as excinfo:
+        await client._generate(client.vision_model, ["look"], None)
+    assert excinfo.value.vision is False
+    assert excinfo.value.daily is True  # the quota itself is reported unchanged
+
+
 async def test_one_model_for_both_jobs_drops_the_photo_wording() -> None:
     """With GEMINI_VISION_MODEL == GEMINI_TEXT_MODEL, "describe it in text" cannot help."""
     client, _ = client_with([_daily_429()])

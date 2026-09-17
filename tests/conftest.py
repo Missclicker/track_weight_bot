@@ -283,9 +283,10 @@ def _gemini() -> ai.GeminiClient:
 def client_with(outcomes: list[Any]) -> tuple[ai.GeminiClient, FakeModels]:
     """A `GeminiClient` whose SDK call answers `outcomes` in order, plus the recorder."""
     client = _gemini()
-    # The one cached client is shared by the whole suite, so a quota cooldown armed by one test
-    # would silence the next one's calls. Start every test with an empty register.
+    # The one cached client is shared by the whole suite, so a cooldown armed by one test would
+    # silence the next one's calls. Start every test with both registers empty.
     client._cooldowns.clear()
+    client._overloads.clear()
     models = FakeModels(outcomes)
     client._client = _Client(models)  # type: ignore[assignment]
     return client, models

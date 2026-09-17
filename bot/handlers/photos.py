@@ -54,9 +54,11 @@ async def record_food(
 async def on_photo(
     message: Message, bot: Bot, repo: SheetsRepo, ai: GeminiClient, settings: Settings
 ) -> None:
-    # First, before anything costs us: when the vision quota is spent, paying for a photo
-    # download and a Sheets read only to hear it from Gemini would be wasteful.
+    # First, before anything costs us: when the vision quota is spent or the model is riding out
+    # a demand spike, paying for a photo download and a Sheets read only to hear it from Gemini
+    # would be wasteful.
     ai.check_quota(ai.vision_model)
+    ai.check_overload(ai.vision_model)
     assert message.photo is not None
     largest = max(message.photo, key=lambda p: p.width * p.height)
     buffer = BytesIO()

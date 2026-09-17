@@ -59,8 +59,9 @@ ERROR_TRY_AGAIN = "Не вийшло, спробуй ще раз."
 AI_RETRYING = "AI не відповів, пробую ще раз."
 
 # Two axes decide what to say when Gemini answers 429: *which* model ran out (only photos need the
-# vision one, so describing the meal in text still works without it - unless both env vars name
-# the same model, which `GeminiClient._is_vision_outage` checks) and *how long* it is gone
+# vision one, so describing the meal in text still works without it - unless the text model is
+# unusable too, which `GeminiClient._is_vision_only_outage` checks: both env vars naming the same
+# model, or that model being out of quota or overloaded itself) and *how long* it is gone
 # (a per-day quota is back when Google's counter resets, a per-minute one within a minute). No
 # time is promised for the daily case: that counter resets at midnight Pacific, which can be an
 # hour from now or twenty - "спробуй завтра" would often be a lie. Nor is a duration
@@ -82,6 +83,25 @@ def quota_notice(vision: bool, daily: bool) -> str:
     if vision:
         return AI_QUOTA_PHOTO_DAY if daily else AI_QUOTA_PHOTO_SOON
     return AI_QUOTA_DAY if daily else AI_QUOTA_SOON
+
+
+# A 503 is not our budget running out but Google's model being swamped by everyone's traffic, so
+# the quota wording ("ліміт вичерпано") would blame the wrong thing. Only one axis is left here:
+# *which* model is gone. The photo variant keeps pointing at `/їжа <текст>`, but only when the
+# text model is really usable (`GeminiClient._is_vision_only_outage` decides, the same test the
+# quota wording above goes through). No duration is promised: a demand spike lasts as long as it
+# lasts, and "за хвилину" reads right for the ~30 s
+# set-aside without pretending to count it down.
+AI_BUSY = "AI зараз перевантажений. Спробуй ще раз за хвилину."
+AI_BUSY_PHOTO = (
+    "AI зараз перевантажений. Спробуй надіслати фото ще раз за хвилину "
+    "або опиши їжу текстом: /їжа борщ і два шматки хліба."
+)
+
+
+def busy_notice(vision: bool) -> str:
+    """The message for an overloaded Gemini model: `vision` is the photo path."""
+    return AI_BUSY_PHOTO if vision else AI_BUSY
 
 
 WEIGHT_USAGE = "Напиши вагу так: /w 84.3"
