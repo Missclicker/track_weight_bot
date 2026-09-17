@@ -6,7 +6,7 @@ send path is testable without a clock or a network.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -80,6 +80,11 @@ def _dt(day: date, hour: int = 12) -> datetime:
     return datetime(day.year, day.month, day.day, hour, tzinfo=KYIV)
 
 
+def _in_last_week() -> date:
+    """A day inside the window a *real* `datetime.now()` produces, for the clock-driven job."""
+    return datetime.now(KYIV).date() - timedelta(days=3)
+
+
 async def test_window_is_the_seven_full_days_before_today(repo: FakeRepo, user: User) -> None:
     await repo.upsert_user(user)
     await repo.add_food(user, _food(2000), _dt(date(2026, 9, 6)), "text", 1)  # older than the week
@@ -116,7 +121,9 @@ async def test_average_ignores_days_without_food(repo: FakeRepo, user: User) -> 
 async def test_a_dm_gets_the_personal_wording(repo: FakeRepo) -> None:
     loner = User(user_id=LONER, chat_id=LONER, name="Сам", tz="Europe/Kyiv")
     await repo.upsert_user(loner)
-    await repo.add_food(loner, _food(1800), _dt(date(2026, 9, 9)), "text", 1)
+    # `weekly_reports` takes no `today`, so this row has to sit inside the window the real clock
+    # produces (the 7 full days before today) - a fixed date would rot into a failure.
+    await repo.add_food(loner, _food(1800), _dt(_in_last_week()), "text", 1)
 
     ai = FakeAI()
     jobs, bot = _jobs(repo, _settings(f"{GROUP},{LONER}"), ai)
