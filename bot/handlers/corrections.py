@@ -1,8 +1,9 @@
 """Corrections of a food estimate: reply to the bot's "≈ ..." message.
 
-A number replaces the kcal value directly. A delete word ("видали") throws the row away. Any
-other text ("це 300 г", "без хліба", "це солянка, а не борщ") goes to Gemini together with the
-earlier estimate - text only, never the original photo - and the whole row is re-estimated.
+A number replaces the kcal value directly. A cancel phrase ("видали", "це жарт", "я випадково")
+throws the row away. Any other text ("це 300 г", "без хліба", "це солянка, а не борщ") goes to
+Gemini together with the earlier estimate - text only, never the original photo - and the whole
+row is re-estimated.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from bot import i18n
 from bot.ai import GeminiClient
 from bot.config import Settings
 from bot.handlers import ensure_user
-from bot.parsing import is_delete_request, parse_correction
+from bot.handlers.weight import weigh_in
+from bot.parsing import is_food_cancel_request, parse_correction
 from bot.reports import day_food
 from bot.scheduler import user_now
 from bot.sheets import SheetsRepo, User
@@ -30,16 +32,22 @@ _MAX_CORRECTION_TEXT = 500
 class CorrectionReply(BaseFilter):
     """A text reply to one of the bot's own food-estimate messages.
 
-    `kind="kcal"` matches a bare number and injects `kcal`; `kind="delete"` matches a delete word;
-    `kind="text"` matches any other text and injects `correction_text`. The three kinds are
-    mutually exclusive, so the registration order in `build()` only decides which handler is
+    `kind="kcal"` matches a bare number and injects `kcal`; `kind="delete"` matches a cancel
+    phrase; `kind="text"` matches any other text and injects `correction_text`. The three kinds
+    are mutually exclusive, so the registration order in `build()` only decides which handler is
     tried first, never what a message means.
+
+    The same holds against the `weight` router, which is included right after this one: a reply
+    that `weight.weigh_in` claims as a weigh-in is refused by all three kinds here, so no message
+    is ever claimed by both routers.
     """
 
     def __init__(self, kind: Literal["kcal", "text", "delete"]) -> None:
         self.kind = kind
 
-    async def __call__(self, message: Message, bot: Bot) -> bool | dict[str, object]:
+    async def __call__(
+        self, message: Message, bot: Bot, settings: Settings
+    ) -> bool | dict[str, object]:
         reply = message.reply_to_message
         if reply is None or reply.from_user is None or reply.from_user.id != bot.id:
             return False
@@ -48,9 +56,14 @@ class CorrectionReply(BaseFilter):
         text = (message.text or "").strip()
         if not text:
             return False
-        if is_delete_request(text):
+        # first, because a cancel phrase can never parse as a number or a weight
+        if is_food_cancel_request(text):
             return self.kind == "delete"
         if self.kind == "delete":
+            return False
+        if weigh_in(message, bot, settings) is not None:
+            # "84,3" / "84 кг" / "вага 84" answering an estimate is somebody weighing in next to
+            # their lunch, not a correction of it; `weight` takes the message from here
             return False
         kcal = parse_correction(text)
         if self.kind == "kcal":
@@ -143,7 +156,7 @@ async def on_text_correction(
 
 def build() -> Router:
     router = Router(name="corrections")
-    # delete first: "видали" must never reach Gemini as a correction of the dish
+    # delete first: "видали" (or "це жарт") must never reach Gemini as a correction of the dish
     router.message.register(on_delete, CorrectionReply("delete"))
     router.message.register(on_correction, CorrectionReply("kcal"))
     router.message.register(on_text_correction, CorrectionReply("text"))

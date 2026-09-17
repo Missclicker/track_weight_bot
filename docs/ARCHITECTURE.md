@@ -19,7 +19,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/__main__.py` | Entry point. Loads settings (fails fast with a readable message), ensures the sheet schema, builds `Bot`/`Dispatcher`, injects dependencies, starts the scheduler and polling. |
 | `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist. |
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
-| `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `parse_kcal_target`, `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
+| `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
@@ -54,24 +54,44 @@ Inside `guarded` the routers are tried in order:
    registered before them) cancels the command instead: no Gemini call, no row.
 2. `water` - `/вода` (`/water`, `/voda`): show, set or cancel the sender's water reminders.
 3. `corrections` - a reply to a bot message that starts with `≈` (the food-estimate prefix).
-   A number -> `update_food_kcal(user_id, message_id)`. A delete word (`parsing.is_delete_request`)
+   A number -> `update_food_kcal(user_id, message_id)`. A cancel phrase
+   (`parsing.is_food_cancel_request`)
    -> `delete_food_entry`, registered first so "видали" is never shipped to Gemini as a correction.
-   `parsing.is_delete_request` accepts a delete verb plus filler words only ("видали цей
-   запис"), so "прибери хліб" - drop an ingredient from the estimate - stays a correction
-   of the dish. Any other text -> `get_food_entry`,
+   That predicate is the *wide* vocabulary: the delete verbs plus filler words that
+   `parsing.is_delete_request` already took ("видали цей запис"), plus the regret phrases people
+   type instead of an order - "не записуй", "це жарт", "я випадково", "помилково". Both are
+   whole-message and whole-word, so "прибери хліб" and "не записуй хліб" - drop an ingredient from
+   the estimate - stay corrections of the dish, and "помилкова порція" is not "помилка". The regret
+   half is deliberately food-only (`sport.SportDeleteReply`, `commands.PromptCancel` and
+   `commands.InputPrompt` keep asking `is_delete_request`): a wrong photo is the thing people
+   regret out loud, and widening the vocabulary everywhere would start eating ordinary replies.
+   A reply that `weight.weigh_in` claims as a weigh-in is refused by all three kinds, which is what
+   keeps this router and `weight` mutually exclusive. Any other text -> `get_food_entry`,
    `GeminiClient.revise_food` with the earlier estimate + the user's text - text model only, the
    photo is never re-sent -> new `≈` reply -> `update_food_entry`, which also re-keys
    the row to the new reply's `message_id` so corrections can be chained. All three are scoped to
    the sender, so only the author of an entry can correct or delete it and equal `message_id`s from
    different groups never collide. All three replies end with the total for the day the entry
    belongs to ("за сьогодні" or "за <date>"), read back from the sheet after the write.
-4. `weight` - a bare number in `[WEIGHT_MIN, WEIGHT_MAX]` that is not a reply, or a number in
-   reply to the morning ping (recognised by the ping text, so it survives restarts) -> `add_weight`.
+4. `weight` - a number in `[WEIGHT_MIN, WEIGHT_MAX]` that is not a reply (`source="text"`), or one
+   replying to any message of *ours* -> `add_weight`. `weight.weigh_in` is the single decision: the
+   morning ping gives `source="ping"`, every other bot message (a sport confirmation, `/kcal`, the
+   weekly report, an error reply) gives `source="reply"`, because people do weigh in by answering
+   whatever is on screen. Our messages are told apart by their text prefix, never by a remembered
+   message id, so the whole thing survives a restart. A reply to another *person* is conversation
+   and is ignored. The one stricter case is a reply to the `≈` food estimate, where
+   `parse_weight(require_marker=True)` demands a decimal, a "кг"/"kg" unit or a "вага"/"weight"
+   label: 40..200 overlaps perfectly plausible kcal corrections of a portion, so a bare "84" under
+   an estimate stays a correction and only "84.3" / "84 кг" / "вага 84" is a weigh-in. Replies to
+   the `/їжа` and `/спорт` prompts never reach here - `commands` is the first router inside
+   `guarded` and records them as food or sport.
 5. `photos` - any photo -> Gemini vision -> reply -> `add_food` with the *reply's* `message_id`
    so a later correction can find the row.
-6. `sport` - a delete word in reply to a bot message starting with `Спорт:` -> `delete_sport_entry`.
+6. `sport` - a delete word (`parsing.is_delete_request`, the narrow vocabulary - the regret phrases
+   delete food rows only) in reply to a bot message starting with `Спорт:` -> `delete_sport_entry`.
    That is the whole router: any other reply to a sport confirmation is ignored, re-estimating an
-   activity is not a thing the bot does.
+   activity is not a thing the bot does - except a number, which `weight` (tried before this
+   router) has already taken as a weigh-in.
 
 Recording sport has no router of its own: free text is never scanned for sport keywords (too many
 false positives in a chatty group), so `sport.record_sport` is reached only from `/sport` and its

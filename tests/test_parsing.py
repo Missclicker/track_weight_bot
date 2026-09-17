@@ -5,8 +5,10 @@ import pytest
 from bot.parsing import (
     DELETE_PHRASES,
     DELETE_WORDS,
+    FOOD_CANCEL_PHRASES,
     WaterSchedule,
     is_delete_request,
+    is_food_cancel_request,
     is_target_clear_request,
     is_water_due,
     parse_correction,
@@ -82,6 +84,31 @@ def test_parse_weight_rejects(text: str | None) -> None:
 def test_parse_weight_respects_custom_range() -> None:
     assert parse_weight("35", 30, 60) == 35.0
     assert parse_weight("84", 30, 60) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("84.3", 84.3),  # a decimal part ...
+        ("84,3", 84.3),
+        ("84 кг", 84.0),  # ... a unit ...
+        ("84кг", 84.0),
+        ("84 kg", 84.0),
+        ("вага 84", 84.0),  # ... or a label
+        ("вага: 84,3кг", 84.3),
+        ("weight 84", 84.0),
+        ("в 84", 84.0),
+        ("84", None),  # a bare integer is the ambiguous case the flag exists for
+        ("150", None),
+        ("40", None),
+        ("  200  ", None),
+    ],
+)
+def test_parse_weight_with_require_marker(text: str, expected: float | None) -> None:
+    """Replying to a food estimate, only a number that says "this is kilograms" is a weigh-in:
+    the 40..200 range overlaps perfectly plausible kcal corrections of a portion."""
+    assert parse_weight(text, LO, HI, require_marker=True) == expected
+    assert parse_weight(text, LO, HI) is not None  # ... all of them are weights without the flag
 
 
 @pytest.mark.parametrize(
@@ -268,6 +295,91 @@ def test_delete_request_allows_filler_around_the_verb(text: str) -> None:
 )
 def test_delete_request_rejects(text: str | None) -> None:
     assert not is_delete_request(text)
+
+
+@pytest.mark.parametrize("phrase", sorted(FOOD_CANCEL_PHRASES))
+def test_every_regret_phrase_cancels_food(phrase: str) -> None:
+    assert is_food_cancel_request(phrase)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "не записуй",
+        "Не записуй це.",
+        "не записуйте",
+        "не записувати",
+        "не треба записувати",
+        "НЕ ТРЕБА ЦЕ ЗАПИСУВАТИ!",
+        "не рахуй",
+        "не рахуй це",
+        "не враховуй",
+        "не враховуй це",
+        "жарт",
+        "це жарт",
+        "Це був жарт",
+        "жартую",
+        "я жартую",
+        "жартував",
+        "жартувала",
+        "випадково",
+        "я випадково",
+        "це випадково",
+        "випадково відправив",
+        "випадково відправила",
+        "випадково надіслав",
+        "випадково надіслала",
+        "я випадково відправив",
+        "помилка",
+        "це помилка",
+        "помилково",
+        "я помилково",
+        "не записуй будь ласка",  # politeness is tolerated on any of them ...
+        "це жарт, плз",
+        "помилково pls",
+        "видали",  # ... and everything the narrower predicate already took still counts
+        "видали цей запис",
+        "скасуй будь ласка",
+        "це не моє",
+    ],
+)
+def test_food_cancel_request_accepts(text: str) -> None:
+    assert is_food_cancel_request(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,
+        "",
+        "не видали",  # a refusal, not a deletion
+        "не записуй хліб",  # a content noun changes the ask into a correction of the dish ...
+        "не рахуй хліб",
+        "це жарт про борщ",
+        "випадково додав хліб",
+        "помилка в грамах",
+        "жартівливий салат",  # ... and a near-miss word form is not the phrase at all
+        "помилкова порція",
+        "записуй",
+        "це 300 г",
+        "без хліба",
+        "видали хліб",
+        "прибери хліб",
+        "видали 300",
+        "650",
+        "скасування",
+    ],
+)
+def test_food_cancel_request_rejects(text: str | None) -> None:
+    assert not is_food_cancel_request(text)
+
+
+def test_food_cancel_request_does_not_widen_the_delete_vocabulary() -> None:
+    """The regret phrases delete food rows only: sport deletes and the `/їжа` prompt keep asking
+    `is_delete_request`, so it must stay blind to them."""
+    assert not is_delete_request("це жарт")
+    assert not is_delete_request("я випадково")
+    assert not is_delete_request("не записуй")
 
 
 @pytest.mark.parametrize(

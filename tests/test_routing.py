@@ -236,15 +236,38 @@ async def test_bare_number_is_weight(harness, repo: FakeRepo, monkeypatch) -> No
     assert "-0.5" in session.sent[-1]["text"]
 
 
-async def test_reply_to_ping_is_weight_but_other_reply_is_not(harness, repo: FakeRepo) -> None:
+async def test_a_number_replying_to_us_is_a_weigh_in_replying_to_a_person_is_not(
+    harness, repo: FakeRepo
+) -> None:
+    """People weigh in by answering whatever bot message is on screen, so any reply to us counts;
+    the morning ping only differs in the `source` it is stored under. A reply to another member is
+    conversation and stays ignored."""
     dp, bot, _, _ = harness
     ping = _bot_message(i18n.PING.format(mentions="x"), 500)
     await dp.feed_update(bot, _update("85", reply_to=ping))
     assert repo.rows["weight"][0]["source"] == "ping"
 
+    listing = _bot_message("Калорії за сьогодні", 501)
+    await dp.feed_update(bot, _update("84,6", reply_to=listing, message_id=2))
+    assert (repo.rows["weight"][1]["kg"], repo.rows["weight"][1]["source"]) == (84.6, "reply")
+
     human = _update("скільки?").message
     await dp.feed_update(bot, _update("85", reply_to=human, message_id=3))
-    assert len(repo.rows["weight"]) == 1  # a number replying to a person is ignored
+    assert len(repo.rows["weight"]) == 2  # a number replying to a person is ignored
+
+
+async def test_a_number_replying_to_a_sport_confirmation_is_a_weigh_in(
+    harness, repo: FakeRepo
+) -> None:
+    """The sport router only deletes, so a number under a confirmation used to be dropped."""
+    dp, bot, session, _ = harness
+    await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
+    sport_msg = _bot_message(session.sent[-1]["text"], 1001)
+
+    await dp.feed_update(bot, _update("84", reply_to=sport_msg, message_id=2))
+    row = repo.rows["weight"][0]
+    assert (row["kg"], row["source"]) == (84.0, "reply")
+    assert len(repo.rows["sport"]) == 1  # the activity is untouched
 
 
 async def test_reply_to_food_estimate_is_correction(harness, repo: FakeRepo, user) -> None:
@@ -758,6 +781,83 @@ async def test_a_delete_verb_with_an_ingredient_is_still_a_correction(harness, r
     # a correction is always text-only: the earlier estimate goes back to the model, the photo
     # never does (that would cost a request against the scarce vision quota)
     assert ai.revise_calls == [("борщ", "прибери хліб")]
+
+
+async def test_a_regret_phrase_deletes_the_food_row(harness, repo: FakeRepo, settings: Settings):
+    """ "це жарт" carries no delete verb, so `is_delete_request` never saw it and the photo stayed
+    in the sheet while Gemini was asked to re-estimate a joke."""
+    dp, bot, session, ai = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій", daily_kcal_target=2000)
+    await repo.upsert_user(me)
+    now = user_now(me, settings)
+    await repo.add_food(me, FoodEstimate(dish="омлет", kcal=500), now, "text", 10)
+    await repo.add_food(me, FoodEstimate(dish="торт", kcal=600), now, "photo", 11)
+    cake = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - торт", 11)
+
+    await dp.feed_update(bot, _update("це жарт", reply_to=cake))
+    assert [r["dish"] for r in repo.rows["food"]] == ["омлет"]
+    assert ai.revise_calls == []
+    assert session.sent[-1]["text"] == f"{i18n.FOOD_DELETED} {i18n.day_total(500, 2000)}"
+
+
+async def test_a_regret_phrase_does_not_delete_a_sport_row(harness, repo: FakeRepo) -> None:
+    """The wider cancel vocabulary is food-only: `sport.SportDeleteReply` still asks for a delete
+    verb, so "я випадково" under a confirmation falls through and is ignored."""
+    dp, bot, session, _ = harness
+    await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
+    sport_msg = _bot_message(session.sent[-1]["text"], 1001)
+    sent_before = len(session.sent)
+
+    await dp.feed_update(bot, _update("я випадково", reply_to=sport_msg, message_id=2))
+    assert len(repo.rows["sport"]) == 1
+    assert len(session.sent) == sent_before  # no reply at all
+
+
+async def test_a_regret_phrase_answering_the_food_prompt_is_food(harness, repo: FakeRepo) -> None:
+    """`commands.InputPrompt` keeps the narrow vocabulary too, so the phrase is read as the food
+    description it literally is - the prompt is cancelled by "скасуй", not by "це жарт"."""
+    dp, bot, session, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="жарт", kcal=100)]
+    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+
+    await dp.feed_update(bot, _update("це жарт", reply_to=prompt))
+    assert ai.estimate_calls == ["це жарт"]
+    assert repo.rows["food"][0]["source"] == "prompt"
+    assert session.sent[-1]["text"] != i18n.PROMPT_CANCELLED
+
+
+async def test_a_kg_marked_number_replying_to_an_estimate_is_a_weigh_in(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, _, ai = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій")
+    await repo.upsert_user(me)
+    now = user_now(me, settings)
+    await repo.add_food(me, FoodEstimate(dish="борщ", kcal=600), now, "photo", 11)
+    borsch = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 11)
+
+    for message_id, text in enumerate(("84.3", "84 кг", "вага 84"), start=1):
+        await dp.feed_update(bot, _update(text, reply_to=borsch, message_id=message_id))
+    assert [r["kg"] for r in repo.rows["weight"]] == [84.3, 84.0, 84.0]
+    assert {r["source"] for r in repo.rows["weight"]} == {"reply"}
+    assert repo.rows["food"][0]["kcal"] == 600  # the estimate was never corrected
+    assert ai.revise_calls == []
+
+
+async def test_a_bare_number_replying_to_an_estimate_is_still_a_correction(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    """The weight range overlaps plausible portion calories, so "150" under an estimate keeps
+    meaning 150 kcal; only a decimal, a unit or a label makes it a weigh-in."""
+    dp, bot, _, _ = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій")
+    await repo.upsert_user(me)
+    await repo.add_food(me, FoodEstimate(dish="сирник", kcal=390), user_now(me, settings), "x", 11)
+    syrnyk = _bot_message(i18n.FOOD_PREFIX + " 390 ккал - сирник", 11)
+
+    await dp.feed_update(bot, _update("150", reply_to=syrnyk))
+    assert repo.rows["food"][0]["kcal"] == 150
+    assert repo.rows["weight"] == []
 
 
 async def test_deleting_someone_elses_food_row_is_refused(harness, repo: FakeRepo, user):

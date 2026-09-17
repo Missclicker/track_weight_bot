@@ -8,11 +8,13 @@ from datetime import datetime, time
 from typing import Any
 
 # "84.3", "84,3", "84.3 кг", "84 kg", "вага 84.3", "вага: 84,3кг", "weight 84.3"
+# The label, the decimal part and the unit are named because `parse_weight(require_marker=True)`
+# asks whether at least one of them is there; a second regex for that question would drift.
 _WEIGHT = re.compile(
     r"""^\s*
-    (?:(?:вага|weight|в|w)\s*[:\-]?\s*)?   # optional label
-    (?P<num>\d{2,3}(?:[.,]\d{1,2})?)       # 2-3 integer digits, up to 2 decimals
-    \s*(?:кг|kg)?\.?\s*$""",
+    (?P<label>(?:вага|weight|в|w)\s*[:\-]?\s*)?   # optional label
+    (?P<num>\d{2,3}(?P<dec>[.,]\d{1,2})?)         # 2-3 integer digits, up to 2 decimals
+    \s*(?P<unit>кг|kg)?\.?\s*$""",
     re.IGNORECASE | re.VERBOSE,
 )
 _TIME = re.compile(r"\d{1,2}:\d{2}")
@@ -34,12 +36,19 @@ def _to_float(raw: str) -> float:
     return float(raw.replace(",", ".").replace(" ", "").replace(" ", ""))
 
 
-def parse_weight(text: str | None, lo: float, hi: float) -> float | None:
+def parse_weight(
+    text: str | None, lo: float, hi: float, *, require_marker: bool = False
+) -> float | None:
     """Extract a body weight from a short message.
 
     Accepts a bare number (with `.` or `,` decimal separator), an optional "кг"/"kg" unit and an
     optional "вага"/"weight" label. Rejects anything that looks like a time, a date or a phone
     number, and any value outside `[lo, hi]`.
+
+    `require_marker` demands that the number carry one of those three markers - a decimal part, a
+    unit or a label. The caller needs it where a bare integer is ambiguous: replying to a food
+    estimate with "84" is a kcal correction, because `[lo, hi]` (40..200 by default) overlaps
+    plausible portion calories, while "84.3", "84 кг" and "вага 84" can only be a weigh-in.
     """
     if not text:
         return None
@@ -48,6 +57,8 @@ def parse_weight(text: str | None, lo: float, hi: float) -> float | None:
         return None
     match = _WEIGHT.match(stripped)
     if not match:
+        return None
+    if require_marker and not (match.group("label") or match.group("dec") or match.group("unit")):
         return None
     value = _to_float(match.group("num"))
     if not lo <= value <= hi:
@@ -161,17 +172,86 @@ _DELETE_FILLERS = frozenset(
 _WORD = re.compile(r"[\w'’ʼ]+")
 
 
+def _normalise(text: str) -> str:
+    """Lowercase, single-spaced, without the trailing punctuation people type when annoyed."""
+    return " ".join(text.strip().lower().split()).rstrip(".!?")
+
+
 def is_delete_request(text: str | None) -> bool:
     """True when the message asks for the record to be thrown away and says nothing else."""
     if not text:
         return False
-    normalised = " ".join(text.strip().lower().split())
-    if normalised.rstrip(".!?") in DELETE_PHRASES:
+    normalised = _normalise(text)
+    if normalised in DELETE_PHRASES:
         return True
     tokens = _WORD.findall(normalised)
     if not any(token in DELETE_WORDS for token in tokens):
         return False
     return all(token in DELETE_WORDS or token in _DELETE_FILLERS for token in tokens)
+
+
+# Regret, rather than an order: the message carries no delete verb at all, so `is_delete_request`
+# cannot see it, but it means exactly the same for a food row. Matched as a whole message and by
+# whole words, which is the entire safety net here - "не записуй хліб" asks to drop an ingredient
+# from the estimate and "помилкова порція" says the size is wrong, and both must still reach
+# Gemini as corrections.
+FOOD_CANCEL_PHRASES = frozenset(
+    {
+        "не записуй",
+        "не записуй це",
+        "не записуйте",
+        "не записувати",
+        "не треба записувати",
+        "не треба це записувати",
+        "не рахуй",
+        "не рахуй це",
+        "не враховуй",
+        "не враховуй це",
+        "жарт",
+        "це жарт",
+        "це був жарт",
+        "жартую",
+        "я жартую",
+        "жартував",
+        "жартувала",
+        "випадково",
+        "я випадково",
+        "це випадково",
+        "випадково відправив",
+        "випадково відправила",
+        "випадково надіслав",
+        "випадково надіслала",
+        "я випадково відправив",
+        "я випадково відправила",
+        "я випадково надіслав",
+        "я випадково надіслала",
+        "помилка",
+        "це помилка",
+        "помилково",
+        "я помилково",
+    }
+)
+# Tolerated at the end of any of those phrases, the way `_DELETE_FILLERS` tolerates them around a
+# delete verb: "не записуй, будь ласка" is the same ask as "не записуй".
+_POLITENESS = frozenset({"будь", "ласка", "плз", "пліз", "please", "pls"})
+
+
+def is_food_cancel_request(text: str | None) -> bool:
+    """True when the message asks for a *food* record to be thrown away.
+
+    A superset of `is_delete_request`: on top of the delete verbs it takes the regret phrases
+    people actually type after sending the wrong photo. Deliberately used by the food corrections
+    only - a sport row and a `/їжа` prompt keep the narrower vocabulary, because those replies are
+    rarer and the regret phrases are the kind of thing somebody says in passing.
+    """
+    if not text:
+        return False
+    if is_delete_request(text):
+        return True
+    tokens = _WORD.findall(_normalise(text))
+    while tokens and tokens[-1] in _POLITENESS:
+        tokens.pop()
+    return " ".join(tokens) in FOOD_CANCEL_PHRASES
 
 
 # -- stored timestamps --------------------------------------------------------------------------

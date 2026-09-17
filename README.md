@@ -258,8 +258,10 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
 | photo (optionally with caption)                                                                                    | Gemini vision → kcal estimate with the portion it assumed, e.g. `≈ 520 ккал - картопля з м'ясом, 400 г` (+ today's running total) → `food` |
 | bare number in `[WEIGHT_MIN, WEIGHT_MAX]`, e.g. `84.3` / `84,3`                                                    | weight → `weight`                                           |
-| reply to the bot's morning ping with a number                                                                      | weight                                                      |
-| reply to the bot's food estimate with a number                                                                     | sets kcal of that estimate                                  |
+| reply to the bot's morning ping with a number                                                                      | weight (`source` = `ping`)                                  |
+| reply to any other bot message with a number — a sport confirmation, `/kcal`, the weekly report … | weight (`source` = `reply`); a number replying to another **person** is ignored |
+| reply to the bot's food estimate with a number                                                                     | sets kcal of that estimate — `84` stays 84 kcal, because the weight range overlaps plausible portions |
+| reply to the bot's food estimate with a number that says kilograms: `84.3`, `84 кг`, `вага 84`     | weight (`source` = `reply`)                                 |
 | reply to the bot's food estimate with text (weight, ingredients, dish name)                                        | Gemini re-estimates it (with the photo) and updates the row |
 | `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                     |
 | `/water …` / `/вода …` (in the group or in the DM)                                                                 | water reminder schedule → `water`                           |
@@ -267,6 +269,7 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | `/food` or `/sport` with no text                                                                                   | the bot asks for it ("Чекаю опис …") and waits for a reply  |
 | reply to that prompt                                                                                               | recorded as food / sport for whoever replied                |
 | reply `видали` (`скасуй`, `прибери`, `delete`, …, optionally padded: `видали цей запис`) to the bot's food estimate or sport confirmation | that row is removed from the sheet. A verb carrying a noun (`прибери хліб`) is a correction instead |
+| reply `не записуй`, `це жарт`, `я випадково`, `помилково` … to the bot's **food** estimate        | the same removal, for the phrases people type instead of an order. Food only: under a sport confirmation they are ignored. A noun still disqualifies (`не записуй хліб` is a correction) |
 | reply `видали` to a `/food` or `/sport` prompt                                                                     | the command is cancelled, nothing is recorded               |
 | anything else                                                                                                      | ignored                                                     |
 
