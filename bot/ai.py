@@ -52,7 +52,10 @@ _QUOTA_COOLDOWN_DEFAULT_S = 60.0
 # (the next photo arrives later than that anyway) and let the bot burn the daily budget on retries.
 _QUOTA_COOLDOWN_MIN_S = 30.0
 # Nothing is ever worth waiting more than a day for: the per-day quotas reset in this tz. It is
-# also the sanity bound on a parsed `retryDelay`, which is what rejects an absurd "1e400s".
+# also the sanity bound in `_duration_s`: a `retryDelay` beyond it (an absurd "1e400s", but a
+# merely implausible "100000s" too) is treated as no answer at all and takes the default below,
+# which errs towards asking Gemini again too early rather than going dark for a day on one
+# malformed field.
 _QUOTA_COOLDOWN_MAX_S = 24 * 3600.0
 # Free-tier requests-per-day counters reset at midnight Pacific, not at the user's midnight.
 _QUOTA_RESET_TZ = ZoneInfo("America/Los_Angeles")

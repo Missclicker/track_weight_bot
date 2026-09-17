@@ -141,13 +141,13 @@ pointless) and defaulted to 60 s. Not every 429 carries either part, so the pars
 and falls through to that default. The daily wait is measured in *elapsed* seconds (both ends go
 through UTC before the subtraction, because CPython ignores a shared `tzinfo` and would otherwise
 count wall-clock hours across a DST switch) and capped at 24 h, which errs the safe way. The
-register is in memory only: a restart forgets it and the
-next 429 simply re-arms it. `check_quota` is called at the top of every attempt (a concurrent call
+register is in memory only: a restart forgets it and the next 429 simply re-arms it. `check_quota` is called at the top of every attempt (a concurrent call
 may have armed the cooldown while this one slept) and, ahead of everything else, by
 `photos.on_photo` - a photo download and a Sheets read are not worth paying for just to learn the
 vision quota is gone. The user gets one of four Ukrainian messages (`i18n.quota_notice`, chosen by
 *which* model ran out and *whether* it was a per-day limit); the photo ones point at `/їжа
-<текст>`, which still works. `scheduler.run_weekly_report` needs no change: it already catches
+<текст>`, which still works - unless `GEMINI_VISION_MODEL` and `GEMINI_TEXT_MODEL` name the
+same model, in which case `_is_vision_outage` drops that advice, because text is equally gone. `scheduler.run_weekly_report` needs no change: it already catches
 `Exception` around the Gemini call and degrades to the numbers-only fallback.
 
 The four public methods take an optional `on_retry` callback that fires *once* per call, just

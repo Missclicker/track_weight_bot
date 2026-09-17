@@ -59,7 +59,8 @@ ERROR_TRY_AGAIN = "Не вийшло, спробуй ще раз."
 AI_RETRYING = "AI не відповів, пробую ще раз."
 
 # Two axes decide what to say when Gemini answers 429: *which* model ran out (only photos need the
-# vision one, and describing the meal in text still works without it) and *how long* it is gone
+# vision one, so describing the meal in text still works without it - unless both env vars name
+# the same model, which `GeminiClient._is_vision_outage` checks) and *how long* it is gone
 # (a per-day quota is back when Google's counter resets, a per-minute one within a minute). No
 # time is promised for the daily case: that counter resets at midnight Pacific, which can be an
 # hour from now or twenty - "спробуй завтра" would often be a lie. Nor is a duration

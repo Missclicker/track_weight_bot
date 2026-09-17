@@ -135,10 +135,11 @@ def test_a_per_minute_quota_is_not_daily() -> None:
     ("now", "expected_h"),
     [
         (datetime(2026, 3, 8, 0, 0, tzinfo=PACIFIC), 23),  # spring forward: 02:00 never happens
-        # fall back: 01:00 happens twice, so the real wait is 25 h - trimmed to the 24 h cap,
-        # which errs the safe way (one request is spent to learn the quota is still out)
-        (datetime(2026, 11, 1, 0, 0, tzinfo=PACIFIC), 24),
-        (datetime(2026, 6, 15, 0, 0, tzinfo=PACIFIC), 24),  # an ordinary day, for contrast
+        # fall back: 01:00 happens twice, so 00:30 is 24.5 real hours from the next midnight but
+        # only 23.5 wall-clock ones. Before the 02:00 switch on purpose: after it the two agree,
+        # and from 00:00 exactly the wall-clock answer would be trimmed to the same 24 h cap.
+        (datetime(2026, 11, 1, 0, 30, tzinfo=PACIFIC), 24),
+        (datetime(2026, 6, 15, 12, 0, tzinfo=PACIFIC), 12),  # an ordinary day, for contrast
     ],
 )
 def test_a_per_day_cooldown_counts_real_hours_across_a_dst_switch(
