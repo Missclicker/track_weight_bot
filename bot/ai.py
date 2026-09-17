@@ -18,7 +18,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -51,7 +51,8 @@ _QUOTA_COOLDOWN_DEFAULT_S = 60.0
 # Google's per-minute `retryDelay` can be a second or two, which would make the cooldown pointless
 # (the next photo arrives later than that anyway) and let the bot burn the daily budget on retries.
 _QUOTA_COOLDOWN_MIN_S = 30.0
-# Nothing is ever worth waiting more than a day for: the per-day quotas reset in this tz.
+# Nothing is ever worth waiting more than a day for: the per-day quotas reset in this tz. It is
+# also the sanity bound on a parsed `retryDelay`, which is what rejects an absurd "1e400s".
 _QUOTA_COOLDOWN_MAX_S = 24 * 3600.0
 # Free-tier requests-per-day counters reset at midnight Pacific, not at the user's midnight.
 _QUOTA_RESET_TZ = ZoneInfo("America/Los_Angeles")
@@ -175,9 +176,17 @@ def quota_cooldown(details: Any, now: datetime | None = None) -> tuple[float, bo
             now.astimezone(_QUOTA_RESET_TZ) if now.tzinfo else now.replace(tzinfo=_QUOTA_RESET_TZ)
         )
         midnight = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        seconds = (midnight - local).total_seconds()
+        # Both sides go through UTC before the subtraction: CPython ignores the tzinfo when two
+        # aware datetimes share it, so a plain `midnight - local` would count wall-clock hours and
+        # be an hour off on each side of a DST switch. The result feeds a `time.monotonic()`
+        # deadline, which only understands elapsed real seconds.
+        seconds = (midnight.astimezone(UTC) - local.astimezone(UTC)).total_seconds()
         return min(max(seconds, _QUOTA_COOLDOWN_MIN_S), _QUOTA_COOLDOWN_MAX_S), True
-    return max(retry_delay or _QUOTA_COOLDOWN_DEFAULT_S, _QUOTA_COOLDOWN_MIN_S), False
+    # `is None`, not `or`: a `retryDelay` of "0s" is an answer ("right away"), and the floor below
+    # is what decides how long that really means - it must not read as a missing value.
+    if retry_delay is None:
+        retry_delay = _QUOTA_COOLDOWN_DEFAULT_S
+    return max(retry_delay, _QUOTA_COOLDOWN_MIN_S), False
 
 
 class FoodEstimate(BaseModel):
@@ -362,6 +371,14 @@ class GeminiClient:
     def text_model(self) -> str:
         return self._text_model
 
+    def _is_vision_outage(self, model: str) -> bool:
+        """Whether losing `model` costs us photos but leaves text estimates working.
+
+        False when both env vars name the same model: photos and text are then gone together, so
+        the photo wording ("describe the meal in text instead") would be advice that cannot work.
+        """
+        return model == self._vision_model and self._vision_model != self._text_model
+
     def check_quota(self, model: str) -> None:
         """Raise `QuotaExceeded` while `model` is cooling down after a 429; else return None."""
         cooldown = self._cooldowns.get(model)
@@ -372,7 +389,7 @@ class GeminiClient:
         if left <= 0:
             del self._cooldowns[model]
             return
-        raise QuotaExceeded(model, left, daily, model == self._vision_model)
+        raise QuotaExceeded(model, left, daily, self._is_vision_outage(model))
 
     async def _generate(
         self,
@@ -425,7 +442,9 @@ class GeminiClient:
                         seconds,
                         exc,
                     )
-                    raise QuotaExceeded(model, seconds, daily, model == self._vision_model) from exc
+                    raise QuotaExceeded(
+                        model, seconds, daily, self._is_vision_outage(model)
+                    ) from exc
                 log.warning("Gemini %s failed (attempt %d): %s", model, attempt + 1, exc)
                 if isinstance(exc, genai_errors.APIError) and exc.code not in _TRANSIENT_CODES:
                     break  # 400/403/404: bad key or retired model - retrying won't help

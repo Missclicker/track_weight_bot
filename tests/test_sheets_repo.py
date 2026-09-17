@@ -246,7 +246,9 @@ async def test_get_and_update_food_entry(repo: SheetsRepo):
     assert after["portion"] == "500 г"
     row = ws(repo, "food").rows[1]
     assert row[HEADERS["food"].index("corrected")] == "TRUE"
-    assert row[HEADERS["food"].index("photo_file_id")] == "AgACfile"  # kept for later corrections
+    # still written after a correction: the column is a reference to the original photo, even
+    # though a revision no longer sends it anywhere (see `SheetsRepo.add_food`)
+    assert row[HEADERS["food"].index("photo_file_id")] == "AgACfile"
 
 
 async def test_delete_food_entry_removes_the_row_and_returns_it(repo: SheetsRepo):

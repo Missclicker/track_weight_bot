@@ -138,7 +138,10 @@ length comes from the pure `quota_cooldown(details)`, which reads the 429 body: 
 next midnight in `America/Los_Angeles` (where Google resets the daily counters), anything else
 uses the `google.rpc.RetryInfo` `retryDelay`, floored at 30 s (a 1 s delay would make the cooldown
 pointless) and defaulted to 60 s. Not every 429 carries either part, so the parser never raises
-and falls through to that default. The register is in memory only: a restart forgets it and the
+and falls through to that default. The daily wait is measured in *elapsed* seconds (both ends go
+through UTC before the subtraction, because CPython ignores a shared `tzinfo` and would otherwise
+count wall-clock hours across a DST switch) and capped at 24 h, which errs the safe way. The
+register is in memory only: a restart forgets it and the
 next 429 simply re-arms it. `check_quota` is called at the top of every attempt (a concurrent call
 may have armed the cooldown while this one slept) and, ahead of everything else, by
 `photos.on_photo` - a photo download and a Sheets read are not worth paying for just to learn the

@@ -236,7 +236,7 @@ class FakeResponse:
 
 
 class FakeModels:
-    """Answers `generate_content` from a scripted list and records the deadline of every call.
+    """Answers `generate_content` from a scripted list and records what every call was given.
 
     A list item is either an exception (raised) or a string (returned as the response text).
     """
@@ -244,10 +244,15 @@ class FakeModels:
     def __init__(self, outcomes: list[Any]) -> None:
         self.outcomes = outcomes
         self.timeouts: list[int | None] = []
+        # which model each call went to, so a test can pin the vision/text routing itself
+        self.models: list[str] = []
+        self.contents: list[Any] = []
 
     async def generate_content(self, *, model: str, contents: Any, config: Any) -> FakeResponse:
         http_options = config.http_options
         self.timeouts.append(None if http_options is None else http_options.timeout)
+        self.models.append(model)
+        self.contents.append(contents)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome

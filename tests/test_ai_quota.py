@@ -128,6 +128,31 @@ def test_a_per_minute_quota_is_not_daily() -> None:
     assert (seconds, daily) == (45.0, False)
 
 
+# Both DST switches: the cooldown becomes a `time.monotonic()` deadline, so it has to count
+# elapsed *real* seconds. Subtracting two aware datetimes that share a tzinfo counts wall-clock
+# hours instead, which is an hour out on each side of a switch.
+@pytest.mark.parametrize(
+    ("now", "expected_h"),
+    [
+        (datetime(2026, 3, 8, 0, 0, tzinfo=PACIFIC), 23),  # spring forward: 02:00 never happens
+        # fall back: 01:00 happens twice, so the real wait is 25 h - trimmed to the 24 h cap,
+        # which errs the safe way (one request is spent to learn the quota is still out)
+        (datetime(2026, 11, 1, 0, 0, tzinfo=PACIFIC), 24),
+        (datetime(2026, 6, 15, 0, 0, tzinfo=PACIFIC), 24),  # an ordinary day, for contrast
+    ],
+)
+def test_a_per_day_cooldown_counts_real_hours_across_a_dst_switch(
+    now: datetime, expected_h: int
+) -> None:
+    seconds, daily = quota_cooldown(_body(_quota_failure(_PER_DAY_ID)), now)
+    assert (seconds, daily) == (expected_h * 3600, True)
+
+
+def test_a_zero_retry_delay_still_gets_the_floor() -> None:
+    """ "0s" is an answer, not a missing value: it must not be read as "no RetryInfo at all"."""
+    assert quota_cooldown(_body(_retry_info("0s"))) == (ai._QUOTA_COOLDOWN_MIN_S, False)
+
+
 def test_a_naive_now_is_read_as_pacific() -> None:
     """The parameter exists for tests; a naive clock must not crash the comparison."""
     seconds, daily = quota_cooldown(_body(_quota_failure(_PER_DAY_ID)), datetime(2026, 9, 17, 18))
@@ -220,3 +245,53 @@ async def test_a_public_method_reports_the_quota() -> None:
     with pytest.raises(QuotaExceeded):
         await client.estimate_food(b"jpeg", "image/jpeg", None)
     assert models.calls == 1
+
+
+# --- which model each job runs on ------------------------------------------------------------
+# The whole point of the per-model cooldown is that photos and text have separate budgets, so the
+# routing itself has to be pinned: sending a revision to the vision model would quietly spend the
+# quota this change exists to protect.
+
+
+async def test_a_photo_goes_to_the_vision_model() -> None:
+    client, models = client_with(['{"dish": "борщ", "kcal": 500}'])
+    await client.estimate_food(b"jpeg", "image/jpeg", None)
+    assert models.models == [client.vision_model]
+
+
+async def test_a_text_estimate_goes_to_the_text_model() -> None:
+    client, models = client_with(['{"dish": "борщ", "kcal": 500}'])
+    await client.estimate_food(None, None, "борщ")
+    assert models.models == [client.text_model]
+
+
+async def test_a_revision_goes_to_the_text_model_and_carries_no_image() -> None:
+    client, models = client_with(['{"dish": "борщ без хліба", "kcal": 400}'])
+    await client.revise_food({"dish": "борщ", "kcal": 500}, "без хліба")
+    assert models.models == [client.text_model]
+    # one plain string, no `types.Part`: an entry that came from a photo is revised from the
+    # earlier estimate alone
+    assert [type(part) for part in models.contents[0]] == [str]
+
+
+async def test_a_revision_still_works_while_the_vision_quota_is_spent() -> None:
+    """The reason the routing matters: photos go dark, corrections do not."""
+    client, models = client_with([_daily_429(), '{"dish": "борщ", "kcal": 400}'])
+    with pytest.raises(QuotaExceeded):
+        await client.estimate_food(b"jpeg", "image/jpeg", None)
+    est = await client.revise_food({"dish": "борщ", "kcal": 500}, "це 300 г")
+    assert est.kcal == 400
+    assert models.models == [client.vision_model, client.text_model]
+
+
+async def test_one_model_for_both_jobs_drops_the_photo_wording() -> None:
+    """With GEMINI_VISION_MODEL == GEMINI_TEXT_MODEL, "describe it in text" cannot help."""
+    client, _ = client_with([_daily_429()])
+    same, original = client.vision_model, client.text_model  # one client serves the whole suite
+    client._text_model = same  # type: ignore[misc]
+    try:
+        with pytest.raises(QuotaExceeded) as excinfo:
+            await client._generate(same, ["look"], None)
+        assert excinfo.value.vision is False
+    finally:
+        client._text_model = original  # type: ignore[misc]

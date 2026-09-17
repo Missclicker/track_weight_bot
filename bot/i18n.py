@@ -60,17 +60,19 @@ AI_RETRYING = "AI не відповів, пробую ще раз."
 
 # Two axes decide what to say when Gemini answers 429: *which* model ran out (only photos need the
 # vision one, and describing the meal in text still works without it) and *how long* it is gone
-# (a per-day quota is back tomorrow, a per-minute one within a minute). No duration is
-# interpolated: "за хвилину" reads right for any short cooldown, and a wrong count of minutes
-# would be worse than none.
+# (a per-day quota is back when Google's counter resets, a per-minute one within a minute). No
+# time is promised for the daily case: that counter resets at midnight Pacific, which can be an
+# hour from now or twenty - "спробуй завтра" would often be a lie. Nor is a duration
+# interpolated for the short case: "за хвилину" reads right for any short cooldown, and a
+# wrong count of minutes would be worse than none.
 AI_QUOTA_PHOTO_DAY = (
-    "Ліміт AI на фото вичерпано на сьогодні. Опиши їжу текстом: /їжа борщ і два шматки хліба."
+    "Денний ліміт AI на фото вичерпано. Опиши їжу текстом: /їжа борщ і два шматки хліба."
 )
 AI_QUOTA_PHOTO_SOON = (
     "Забагато запитів до AI. Спробуй надіслати фото ще раз за хвилину "
     "або опиши їжу текстом: /їжа борщ і два шматки хліба."
 )
-AI_QUOTA_DAY = "Ліміт AI вичерпано на сьогодні. Спробуй завтра."
+AI_QUOTA_DAY = "Денний ліміт AI вичерпано. Спробуй пізніше."
 AI_QUOTA_SOON = "Забагато запитів до AI. Спробуй ще раз за хвилину."
 
 
