@@ -28,12 +28,6 @@ def replied_bot_text(message: Message, bot: Bot) -> str | None:
     return reply.text or ""
 
 
-def is_ping_reply(message: Message, bot: Bot) -> bool:
-    """True when `message` replies to one of the bot's own morning pings."""
-    replied = replied_bot_text(message, bot)
-    return replied is not None and replied.startswith(i18n.PING_PREFIX)
-
-
 def weigh_in(message: Message, bot: Bot, settings: Settings) -> tuple[float, str] | None:
     """The weight and the `weight.source` this text message should be stored under, or None when
     it is not a weigh-in.

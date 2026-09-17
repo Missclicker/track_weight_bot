@@ -231,8 +231,8 @@ FOOD_CANCEL_PHRASES = frozenset(
         "я помилково",
     }
 )
-# Tolerated at the end of any of those phrases, the way `_DELETE_FILLERS` tolerates them around a
-# delete verb: "не записуй, будь ласка" is the same ask as "не записуй".
+# Tolerated at either end of any of those phrases, the way `_DELETE_FILLERS` tolerates them
+# around a delete verb: "будь ласка, не записуй" and "не записуй, будь ласка" are the same ask.
 _POLITENESS = frozenset({"будь", "ласка", "плз", "пліз", "please", "pls"})
 
 
@@ -251,6 +251,8 @@ def is_food_cancel_request(text: str | None) -> bool:
     tokens = _WORD.findall(_normalise(text))
     while tokens and tokens[-1] in _POLITENESS:
         tokens.pop()
+    while tokens and tokens[0] in _POLITENESS:
+        tokens.pop(0)
     return " ".join(tokens) in FOOD_CANCEL_PHRASES
 
 

@@ -8,7 +8,7 @@ from html import escape
 
 from bot.parsing import WATER_ALL_DAYS, WATER_WEEKDAYS, WATER_WEEKEND, WaterSchedule
 
-FOOD_PREFIX = "≈"  # replies to messages starting with this are treated as kcal corrections
+FOOD_PREFIX = "≈"  # a reply to a message starting with this corrects, deletes or weighs in
 SPORT_PREFIX = "Спорт:"  # ... and replies to messages starting with this can delete the activity
 
 PRIVATE_CHAT_ONLY_GROUP = "Цей бот працює лише в груповому чаті."

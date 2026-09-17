@@ -298,7 +298,10 @@ def test_delete_request_rejects(text: str | None) -> None:
 
 
 @pytest.mark.parametrize("phrase", sorted(FOOD_CANCEL_PHRASES))
-def test_every_regret_phrase_cancels_food(phrase: str) -> None:
+def test_every_regret_phrase_is_stored_in_canonical_form(phrase: str) -> None:
+    """Not a check of the vocabulary - `test_food_cancel_request_accepts` spells that out from
+    the spec. This pins the *shape* of the entries: the matcher joins normalised tokens, so an
+    entry carrying capitals, punctuation or a double space could never be reached by a message."""
     assert is_food_cancel_request(phrase)
 
 
@@ -334,8 +337,10 @@ def test_every_regret_phrase_cancels_food(phrase: str) -> None:
         "це помилка",
         "помилково",
         "я помилково",
-        "не записуй будь ласка",  # politeness is tolerated on any of them ...
+        "не записуй будь ласка",  # politeness is tolerated on any of them, at either end ...
         "це жарт, плз",
+        "будь ласка, не записуй",  # ... and Ukrainian puts "будь ласка" in front just as often
+        "плз не рахуй",
         "помилково pls",
         "видали",  # ... and everything the narrower predicate already took still counts
         "видали цей запис",

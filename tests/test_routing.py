@@ -860,6 +860,27 @@ async def test_a_bare_number_replying_to_an_estimate_is_still_a_correction(
     assert repo.rows["weight"] == []
 
 
+async def test_a_marked_number_under_someone_elses_estimate_is_a_weigh_in(
+    harness, repo: FakeRepo, user
+) -> None:
+    """The weight branch is deliberately not sender-scoped: a weigh-in belongs to whoever typed
+    it, whatever message it happened to land under. The kcal branch still is, so the bare number
+    below is refused instead of rewriting somebody else's entry."""
+    dp, bot, session, _ = harness
+    await repo.add_food(user, FoodEstimate(dish="борщ", kcal=600), datetime.now(), "photo", 778)
+    food_msg = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 778)
+
+    await dp.feed_update(bot, _update("84.3", reply_to=food_msg))
+    assert [(r["user_id"], r["kg"], r["source"]) for r in repo.rows["weight"]] == [
+        (ME, 84.3, "reply")
+    ]
+    assert repo.rows["food"][0]["kcal"] == 600
+
+    await dp.feed_update(bot, _update("150", reply_to=food_msg, message_id=2))
+    assert repo.rows["food"][0]["kcal"] == 600
+    assert session.sent[-1]["text"] == i18n.CORRECTION_NOT_FOUND
+
+
 async def test_deleting_someone_elses_food_row_is_refused(harness, repo: FakeRepo, user):
     dp, bot, session, _ = harness
     await repo.add_food(user, FoodEstimate(dish="борщ", kcal=600), datetime.now(), "photo", 778)

@@ -45,7 +45,7 @@ class InputPrompt(BaseFilter):
     """A text reply to the bot's "Чекаю опис ..." prompt for `/food` or `/sport`.
 
     The prompt is recognised by its text prefix rather than a remembered message id, so it
-    survives a restart (the same trick as `weight.is_ping_reply`). Injects `payload`.
+    survives a restart (the same trick as `weight.replied_bot_text`). Injects `payload`.
     """
 
     def __init__(self, kind: Literal["food", "sport"]) -> None:
