@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
+from bot.parsing import ts_time
 from bot.sheets import User, num, num_or_none
 
 
@@ -37,20 +38,30 @@ class TodaySummary:
         return self.kcal_in - self.sport_kcal
 
 
+class FoodItem(NamedTuple):
+    """One logged meal. A plain tuple, so `(at, dish, kcal)` still compares equal to it."""
+
+    at: str | None  # "HH:MM" in the user's own timezone, None when the row has no usable ts
+    dish: str
+    kcal: float
+
+
 @dataclass
 class DayFood:
     """Food entries of one user for one calendar day, in the order they were logged."""
 
-    items: list[tuple[str, float]]  # (dish, kcal)
+    items: list[FoodItem]
 
     @property
     def total_kcal(self) -> float:
-        return sum(kcal for _, kcal in self.items)
+        return sum(item.kcal for item in self.items)
 
 
 async def day_food(repo: Repo, user_id: int, day: date) -> DayFood:
     rows = await repo.user_rows_between("food", user_id, day, day)
-    return DayFood([(str(r.get("dish", "")), num(r.get("kcal"))) for r in rows])
+    return DayFood(
+        [FoodItem(ts_time(r.get("ts")), str(r.get("dish", "")), num(r.get("kcal"))) for r in rows]
+    )
 
 
 async def today_summary(repo: Repo, user: User, today: date) -> TodaySummary:

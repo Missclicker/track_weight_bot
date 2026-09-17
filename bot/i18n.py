@@ -201,6 +201,7 @@ TODAY_NO_DATA = "Сьогодні записів ще немає."
 
 KCAL_HEADER = "Їжа за сьогодні, {name} ({date}):"
 KCAL_NO_DATA = "Сьогодні їжі ще не записано."
+KCAL_NO_TIME = "--:--"  # shown instead of the time when the row has no usable ts
 
 TARGET_USAGE = (
     "Денна ціль по калоріях: /ціль 2000 (від {lo} до {hi} ккал). "
@@ -320,15 +321,24 @@ def today_summary(
 
 
 def kcal_today(
-    name: str, date_str: str, items: list[tuple[str, float]], daily_target: float | None
+    name: str,
+    date_str: str,
+    items: list[tuple[str | None, str, float]],
+    daily_target: float | None,
 ) -> str:
-    """`/kcal`: today's food entries one per line and the total. Never starts with FOOD_PREFIX."""
+    """`/kcal`: today's food entries one per line and the total. Never starts with FOOD_PREFIX.
+
+    Each item is `(at, dish, kcal)` - `reports.FoodItem` - where `at` is the "HH:MM" the entry was
+    logged at in the user's own timezone; a row without a usable timestamp shows `KCAL_NO_TIME`.
+    """
     lines = [KCAL_HEADER.format(name=escape(name), date=date_str)]
     if not items:
         lines.append(KCAL_NO_DATA)
         return "\n".join(lines)
-    lines.extend(f"- {kcal:.0f} ккал - {escape(dish)}" for dish, kcal in items)
-    total = sum(kcal for _, kcal in items)
+    lines.extend(
+        f"{at or KCAL_NO_TIME} - {kcal:.0f} ккал - {escape(dish)}" for at, dish, kcal in items
+    )
+    total = sum(kcal for _, _, kcal in items)
     lines.append(f"Разом: {total:.0f} ккал{_target_suffix(daily_target)}.")
     return "\n".join(lines)
 

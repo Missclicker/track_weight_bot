@@ -87,7 +87,9 @@ class FakeRepo:
         self._append(
             "food",
             [
-                when.isoformat(),
+                # same precision as the real repo: `ts` is rendered as HH:MM by `/kcal`, so the
+                # fake must not feed the parser a shape production never writes
+                when.isoformat(timespec="seconds"),
                 when.date().isoformat(),
                 user.user_id,
                 user.name,

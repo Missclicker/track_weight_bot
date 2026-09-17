@@ -19,12 +19,12 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/__main__.py` | Entry point. Loads settings (fails fast with a readable message), ensures the sheet schema, builds `Bot`/`Dispatcher`, injects dependencies, starts the scheduler and polling. |
 | `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist. |
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
-| `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `parse_kcal_target`, `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
+| `bot/parsing.py` | Pure functions: `parse_weight`, `parse_correction`, `parse_kcal_target`, `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
-| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies), `today_summary` and `build_weekly_payload` (the JSON given to Gemini). |
+| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini). |
 | `bot/scheduler.py` | `Jobs` (ping per timezone, water tick, weekly report) and `build_scheduler`. |
 | `bot/handlers/` | aiogram routers, one file per feature; `__init__.py` assembles them and holds the allowed-chat gate and the global error handler. |
 
@@ -42,7 +42,10 @@ Inside `guarded` the routers are tried in order:
    are untouched; the target is optional and `i18n._target_suffix` hides it when it is
    missing, zero or not a finite number. `/food` and food photos
    share `photos.record_food`, which reads the sender's food rows for today so the `≈` reply
-   ends with "Разом за сьогодні: N ккал" (the new entry included); `/kcal` lists those rows.
+   ends with "Разом за сьогодні: N ккал" (the new entry included); `/kcal` lists those rows, each
+   line starting with the time it was logged at ("07:54 - 390 ккал - ..."), read straight off the
+   row's `ts` - it is already in the user's timezone, so no conversion happens. A hand-edited row
+   whose `ts` carries no usable time shows `i18n.KCAL_NO_TIME` ("--:--") instead, never midnight.
    A bare `/food` or `/sport` (tapped from Telegram's command menu) answers with a `ForceReply`
    prompt and the reply to it is recorded - the `InputPrompt` filter recognises the prompt by its
    text prefix, so it survives a restart. Those two handlers are registered in `commands`, the

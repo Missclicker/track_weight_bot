@@ -13,6 +13,7 @@ from bot.parsing import (
     parse_kcal_target,
     parse_water_schedule,
     parse_weight,
+    ts_time,
 )
 
 LO, HI = 40, 200
@@ -267,3 +268,22 @@ def test_delete_request_allows_filler_around_the_verb(text: str) -> None:
 )
 def test_delete_request_rejects(text: str | None) -> None:
     assert not is_delete_request(text)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026-09-17T07:54:00+03:00", "07:54"),  # what add_food writes; the offset is not applied
+        ("2026-09-17T19:05:31+03:00", "19:05"),
+        ("2026-09-17 08:30", "08:30"),  # hand-typed, naive: the wall clock is still the time
+        ("  2026-09-17T07:54:00+03:00  ", "07:54"),
+        ("2026-09-17", None),  # date only - not midnight
+        ("", None),
+        ("   ", None),
+        ("пізніше", None),
+        (None, None),
+        (0, None),
+    ],
+)
+def test_ts_time(value: object, expected: str | None) -> None:
+    assert ts_time(value) == expected

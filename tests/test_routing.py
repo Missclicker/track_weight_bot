@@ -646,8 +646,9 @@ async def test_kcal_command_lists_today(harness, repo: FakeRepo, settings: Setti
     await dp.feed_update(bot, _update("/калорії", message_id=2))
     text = session.sent[-1]["text"]
     assert not text.startswith(i18n.FOOD_PREFIX)  # a reply to it must not count as a correction
-    assert "- 500 ккал - омлет &lt;b&gt;" in text
-    assert "- 630 ккал - борщ" in text
+    at = now.strftime("%H:%M")
+    assert f"\n{at} - 500 ккал - омлет &lt;b&gt;\n" in text  # the entry line starts with the time
+    assert f"\n{at} - 630 ккал - борщ\n" in text
     assert "9000" not in text
     assert text.endswith("Разом: 1130 ккал (ціль 2000).")
 
@@ -826,8 +827,17 @@ async def test_delete_word_answering_the_food_prompt_records_nothing(harness, re
 
 
 def test_target_suffix_hides_missing_or_broken_targets() -> None:
-    assert i18n.kcal_today("A", "2026-09-10", [("x", 100)], None).endswith("Разом: 100 ккал.")
-    assert i18n.kcal_today("A", "2026-09-10", [("x", 100)], 0).endswith("Разом: 100 ккал.")
-    assert "nan" not in i18n.kcal_today("A", "2026-09-10", [("x", 100)], float("nan"))
+    items = [("08:05", "x", 100)]
+    assert i18n.kcal_today("A", "2026-09-10", items, None).endswith("Разом: 100 ккал.")
+    assert i18n.kcal_today("A", "2026-09-10", items, 0).endswith("Разом: 100 ккал.")
+    assert "nan" not in i18n.kcal_today("A", "2026-09-10", items, float("nan"))
     assert "ціль" not in i18n.today_summary("A", "d", 100, 0, 0, 0, None, 1, float("nan"))
     assert "(ціль 1800)" in i18n.day_total(100, 1800)
+
+
+def test_kcal_today_renders_the_time_of_every_entry() -> None:
+    text = i18n.kcal_today("A", "2026-09-17", [("07:54", "сирники", 390), (None, "чай", 20)], None)
+    assert text.splitlines()[1:3] == [
+        "07:54 - 390 ккал - сирники",
+        f"{i18n.KCAL_NO_TIME} - 20 ккал - чай",  # a row without a usable ts still shows up
+    ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, time
+from typing import Any
 
 # "84.3", "84,3", "84.3 кг", "84 kg", "вага 84.3", "вага: 84,3кг", "weight 84.3"
 _WEIGHT = re.compile(
@@ -171,6 +172,26 @@ def is_delete_request(text: str | None) -> bool:
     if not any(token in DELETE_WORDS for token in tokens):
         return False
     return all(token in DELETE_WORDS or token in _DELETE_FILLERS for token in tokens)
+
+
+# -- stored timestamps --------------------------------------------------------------------------
+
+
+def ts_time(value: Any) -> str | None:
+    """Wall-clock "HH:MM" of a stored `ts` cell, or None when it carries no usable time.
+
+    The `ts` column is written in the user's own timezone, so its wall clock is already the time
+    to show: the offset (when there is one) is never applied. A date-only value has no time in it
+    and must not read as midnight. Deliberately not `sheets._parse_ts`, which does a different
+    job - it insists on an offset so two timestamps can be ordered across a DST switch.
+    """
+    raw = str(value).strip()
+    if not raw or ("T" not in raw and " " not in raw):
+        return None
+    try:
+        return datetime.fromisoformat(raw).strftime("%H:%M")
+    except ValueError:
+        return None
 
 
 # -- water reminders ----------------------------------------------------------------------------

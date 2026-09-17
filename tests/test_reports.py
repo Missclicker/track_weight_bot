@@ -145,6 +145,19 @@ async def test_day_food_keeps_order_and_totals(repo: FakeRepo, user: User) -> No
     await repo.add_food(user, _food(600), _dt(today, 9), "photo", 1)
     await repo.add_food(user, _food(9000), _dt(date(2026, 9, 7)), "photo", 3)
     food = await day_food(repo, user.user_id, today)
-    assert food.items == [("тест", 600), ("тест", 400)]
+    # the entries carry the wall-clock time they were logged at, in log order
+    assert food.items == [("09:00", "тест", 600), ("13:00", "тест", 400)]
     assert food.total_kcal == 1000
     assert (await day_food(repo, user.user_id, date(2026, 9, 9))).total_kcal == 0
+
+
+async def test_day_food_survives_a_row_without_a_timestamp(repo: FakeRepo, user: User) -> None:
+    """A hand-edited row can have an empty `ts`; it still counts, it just has no time."""
+    today = date(2026, 9, 8)
+    await repo.add_food(user, _food(400), _dt(today, 13), "text", 2)
+    repo.rows["food"].append(
+        {**repo.rows["food"][0], "ts": "", "dish": "рукою", "kcal": 250, "message_id": 4}
+    )
+    food = await day_food(repo, user.user_id, today)
+    assert food.items == [(None, "рукою", 250), ("13:00", "тест", 400)]
+    assert food.total_kcal == 650
