@@ -6,6 +6,7 @@ the reply and appends the row.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from functools import partial
 from io import BytesIO
 
@@ -16,6 +17,7 @@ from bot import i18n
 from bot.ai import FoodEstimate, GeminiClient
 from bot.config import Settings
 from bot.handlers import ensure_user
+from bot.parsing import strip_yesterday
 from bot.reports import day_food
 from bot.scheduler import user_now
 from bot.sheets import SheetsRepo, User
@@ -29,11 +31,23 @@ async def record_food(
     settings: Settings,
     source: str,
     photo_file_id: str = "",
+    *,
+    yesterday: bool = False,
 ) -> None:
-    """Reply with the estimate plus today's total (this entry included) and store the row."""
+    """Reply with the estimate plus the day's total (this entry included) and store the row.
+
+    With `yesterday` the meal counts towards the previous day in the user's timezone: the running
+    total is read for that day and the reply names it, so nobody has to guess which day the
+    number covers. The row's `ts` still says now - that is when it was typed.
+    """
     now = user_now(user, settings)
-    before = await day_food(repo, user.user_id, now.date())
-    total_line = i18n.day_total(before.total_kcal + est.kcal, user.daily_kcal_target)
+    day = now.date() - timedelta(days=1) if yesterday else now.date()
+    before = await day_food(repo, user.user_id, day)
+    total_line = i18n.day_total(
+        before.total_kcal + est.kcal,
+        user.daily_kcal_target,
+        day.isoformat() if yesterday else None,
+    )
     reply = await message.reply(
         i18n.food_estimate(
             est.dish,
@@ -48,7 +62,9 @@ async def record_food(
             day_total_line=total_line,
         )
     )
-    await repo.add_food(user, est, now, source, reply.message_id, photo_file_id)
+    await repo.add_food(
+        user, est, now, source, reply.message_id, photo_file_id, day=day if yesterday else None
+    )
 
 
 async def on_photo(
@@ -64,17 +80,22 @@ async def on_photo(
     buffer = BytesIO()
     await bot.download(largest, destination=buffer)
     user = await ensure_user(message, repo, settings)
+    # "вчора" in the caption dates the meal, so it is cut out before the model sees it: left in,
+    # it would end up in the dish name and invite the model to reason about the date itself.
+    caption, yesterday = strip_yesterday(message.caption)
     # a photo estimate can take a couple of minutes on a busy hour; say so once if we have to retry
     est = await ai.estimate_food(
         buffer.getvalue(),
         "image/jpeg",
-        message.caption,
+        caption or None,
         on_retry=partial(message.reply, i18n.AI_RETRYING),
     )
     if not est.is_food:
         await message.reply(i18n.FOOD_NOT_FOOD)
         return
-    await record_food(message, user, est, repo, settings, "photo", largest.file_id)
+    await record_food(
+        message, user, est, repo, settings, "photo", largest.file_id, yesterday=yesterday
+    )
 
 
 def build() -> Router:

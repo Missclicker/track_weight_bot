@@ -552,13 +552,19 @@ class SheetsRepo:
         source: str,
         message_id: int,
         photo_file_id: str = "",
+        *,
+        day: date | None = None,
     ) -> None:
         # `photo_file_id` is Telegram's handle for the photo (only this bot can use it), kept in
         # the sheet as a reference to the original. Nothing reads it back today: a free-text
         # correction is revised from the earlier estimate alone, without the pixels.
+        #
+        # `day` overrides the date this meal counts towards ("вчора млинці"), so the two columns
+        # can disagree on purpose: `date` is the lookup key every aggregation groups by, while
+        # `ts` stays the moment the entry was actually typed.
         row = [
             when.isoformat(timespec="seconds"),
-            when.date().isoformat(),
+            (day or when.date()).isoformat(),
             user.user_id,
             user.name,
             est.dish,
@@ -587,12 +593,16 @@ class SheetsRepo:
         when: datetime,
         source: str,
         message_id: int = 0,
+        *,
+        day: date | None = None,
     ) -> None:
         # `message_id` is the bot's confirmation, so a reply to it can find this row again;
         # 0 means "no message to reply to" and simply makes the row undeletable from the chat.
+        # `day` backdates the workout the way it backdates a meal: `date` is what the reports
+        # group by, `ts` remains when the activity was logged.
         row = [
             when.isoformat(timespec="seconds"),
-            when.date().isoformat(),
+            (day or when.date()).isoformat(),
             user.user_id,
             user.name,
             activity,

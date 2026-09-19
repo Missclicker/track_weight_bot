@@ -15,6 +15,7 @@ from bot.parsing import (
     parse_kcal_target,
     parse_water_schedule,
     parse_weight,
+    strip_yesterday,
     ts_time,
 )
 
@@ -404,3 +405,26 @@ def test_food_cancel_request_does_not_widen_the_delete_vocabulary() -> None:
 )
 def test_ts_time(value: object, expected: str | None) -> None:
     assert ts_time(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("вчора млинці зі сметаною", ("млинці зі сметаною", True)),
+        ("волейбол вчора 2 години", ("волейбол 2 години", True)),
+        ("борщ вчора", ("борщ", True)),
+        ("Вчора, млинці", ("млинці", True)),
+        ("учора борщ", ("борщ", True)),
+        ("yesterday pancakes", ("pancakes", True)),
+        ("YESTERDAY   борщ  і  хліб", ("борщ і хліб", True)),
+        ("вчора і сьогодні вчора", ("і сьогодні", True)),  # every occurrence goes
+        ("  борщ   і  хліб  ", ("борщ і хліб", False)),
+        ("позавчора борщ", ("позавчора борщ", False)),
+        ("вчорашній борщ", ("вчорашній борщ", False)),
+        ("вчора", ("", True)),  # nothing left to describe
+        ("", ("", False)),
+        (None, ("", False)),
+    ],
+)
+def test_strip_yesterday(text: str | None, expected: tuple[str, bool]) -> None:
+    assert strip_yesterday(text) == expected

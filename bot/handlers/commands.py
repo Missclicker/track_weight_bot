@@ -28,6 +28,7 @@ from bot.parsing import (
     is_target_clear_request,
     parse_kcal_target,
     parse_weight,
+    strip_yesterday,
 )
 from bot.reports import day_food, today_summary
 from bot.scheduler import Jobs, user_now
@@ -111,19 +112,25 @@ async def _record_food_text(
     source: str,
 ) -> None:
     user = await ensure_user(message, repo, settings)
+    # "вчора" dates the meal and must not reach Gemini: it would be taken for part of the dish.
+    text, yesterday = strip_yesterday(text)
     est = await ai.estimate_food(
         None, None, text, on_retry=partial(message.reply, i18n.AI_RETRYING)
     )
     if not est.is_food:
         await message.reply(i18n.FOOD_NOT_FOOD)
         return
-    await record_food(message, user, est, repo, settings, source)
+    await record_food(message, user, est, repo, settings, source, yesterday=yesterday)
 
 
 async def cmd_food(
     message: Message, command: CommandObject, repo: SheetsRepo, ai: GeminiClient, settings: Settings
 ) -> None:
-    if not command.args:
+    # the marker is stripped before the emptiness test, so a bare "/їжа вчора" is still the bare
+    # command: the prompt goes out and the description comes back as a reply (which may say
+    # "вчора" again)
+    text, _ = strip_yesterday(command.args)
+    if not text:
         await message.reply(i18n.FOOD_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
         return
     await _record_food_text(message, command.args, repo, ai, settings, "text")
@@ -138,7 +145,9 @@ async def on_food_prompt_reply(
 async def cmd_sport(
     message: Message, command: CommandObject, repo: SheetsRepo, ai: GeminiClient, settings: Settings
 ) -> None:
-    if not command.args:
+    # same as `cmd_food`: "/спорт вчора" alone names no activity yet, so it asks for one
+    text, _ = strip_yesterday(command.args)
+    if not text:
         await message.reply(i18n.SPORT_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
         return
     await record_sport(message, command.args, repo, ai, settings, source="command")

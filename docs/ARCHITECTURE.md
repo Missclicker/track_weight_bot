@@ -19,7 +19,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/__main__.py` | Entry point. Loads settings (fails fast with a readable message), ensures the sheet schema, builds `Bot`/`Dispatcher`, injects dependencies, starts the scheduler and polling. |
 | `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist. |
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
-| `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
+| `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
@@ -114,6 +114,14 @@ Anything unmatched is ignored.
 **Dates.** Every timestamp is written in the user's timezone (`users.tz`, fallback
 `DEFAULT_TZ`) and "today" is computed there. The `date` column is the lookup key for all
 aggregations.
+
+"вчора" ("учора", "yesterday") in `/їжа`, `/спорт`, a reply to either prompt or a photo caption
+files the entry under the previous day in the user's timezone: `date` is that day, while `ts`
+stays the moment the message was sent, so the two columns disagree on purpose. `strip_yesterday`
+removes the marker before the text reaches Gemini - the dish name and the activity title come
+back from the model, and "вчора млинці" would otherwise be stored as the dish. The confirmation
+names the day it was filed under ("Разом за 2026-09-18: ...", "Записано за 2026-09-18."), and
+`/їжа вчора` with nothing else is still the bare command: the bot asks for the description.
 
 **Scheduler.** At startup and nightly at 00:05 the bot collects the distinct timezones of active
 users and (re)creates one cron job per timezone at `WEIGH_IN_DEADLINE`. The job mentions

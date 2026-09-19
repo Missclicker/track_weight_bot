@@ -40,6 +40,8 @@ HELP = (
     "/w 84.3 або /вага 84.3 - записати вагу\n"
     "/food борщ і два хліба або /їжа ... - записати їжу текстом; без тексту - запитаю\n"
     "/sport біг 5 км 30 хв або /спорт ... - записати активність; без тексту - запитаю\n"
+    '/їжа вчора млинці або /спорт вчора волейбол 2 години - записати за вчора (слово "вчора" '
+    "працює і у відповіді на запит, і в підписі до фото)\n"
     "/today або /сьогодні - мій підсумок за сьогодні\n"
     "/kcal або /калорії - що я з'їв сьогодні і скільки це ккал\n"
     "/target 2000 або /ціль 2000 - денна ціль ккал (необов'язково; /ціль стоп - прибрати)\n"
@@ -136,6 +138,11 @@ SPORT_INPUT_PROMPT = (
 )
 SPORT_NOT_RECOGNIZED = 'Не розпізнав активність. Спробуй так: "біг 5 км 30 хв" або "зал 1 година".'
 SPORT_SAVED = SPORT_PREFIX + " {activity}, {minutes} хв{distance} - близько {kcal} ккал."
+# The backdated variant. Still starts with SPORT_PREFIX, because that prefix is how a reply is
+# recognised as a delete request for this row.
+SPORT_SAVED_DATE = (
+    SPORT_PREFIX + " {activity}, {minutes} хв{distance} - близько {kcal} ккал. Записано за {date}."
+)
 SPORT_DELETED = "Видалив запис про активність."
 SPORT_NOT_FOUND_FOR_DELETE = "Не знайшов запис для видалення."
 
@@ -279,13 +286,22 @@ def food_estimate(
     return "\n".join(lines)
 
 
-def sport_saved(activity_title: str, minutes: float, distance_km: float | None, kcal: float) -> str:
+def sport_saved(
+    activity_title: str,
+    minutes: float,
+    distance_km: float | None,
+    kcal: float,
+    date_str: str | None = None,
+) -> str:
+    """Confirmation for a stored activity; `date_str` names the day when it is not today."""
     distance = f", {distance_km:g} км" if distance_km else ""
-    return SPORT_SAVED.format(
+    template = SPORT_SAVED if date_str is None else SPORT_SAVED_DATE
+    return template.format(
         activity=escape(activity_title),
         minutes=f"{minutes:.0f}",
         distance=distance,
         kcal=f"{kcal:.0f}",
+        date=date_str,
     )
 
 

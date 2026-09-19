@@ -266,6 +266,7 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                     |
 | `/water …` / `/вода …` (in the group or in the DM)                                                                 | water reminder schedule → `water`                           |
 | `/sport біг 5 км 30 хв` (`/спорт …`)                                                                               | Gemini text parse → `sport`                                 |
+| `/їжа вчора млинці зі сметаною` (`/спорт вчора волейбол 2 години`), or "вчора" in a photo caption or a prompt reply | the same record, but dated **yesterday** in the user's timezone (`ts` still says when it was sent); the word is stripped before Gemini sees the text, and the reply names the date |
 | `/food` or `/sport` with no text                                                                                   | the bot asks for it ("Чекаю опис …") and waits for a reply  |
 | reply to that prompt                                                                                               | recorded as food / sport for whoever replied                |
 | reply `видали` (`скасуй`, `прибери`, `delete`, …, optionally padded: `видали цей запис`) to the bot's food estimate or sport confirmation | that row is removed from the sheet. A verb carrying a noun (`прибери хліб`) is a correction instead |

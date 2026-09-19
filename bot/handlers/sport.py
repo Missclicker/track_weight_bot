@@ -8,6 +8,7 @@ confirmation throws the activity away.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from functools import partial
 
 from aiogram import Bot, Router
@@ -18,17 +19,32 @@ from bot import i18n
 from bot.ai import GeminiClient
 from bot.config import Settings
 from bot.handlers import ensure_user
-from bot.parsing import is_delete_request
+from bot.parsing import is_delete_request, strip_yesterday
 from bot.scheduler import user_now
 from bot.sheets import SheetsRepo
 
 
 async def record_sport(
-    message: Message, text: str, repo: SheetsRepo, ai: GeminiClient, settings: Settings, source: str
+    message: Message,
+    text: str,
+    repo: SheetsRepo,
+    ai: GeminiClient,
+    settings: Settings,
+    source: str,
+    *,
+    yesterday: bool = False,
 ) -> None:
-    """Parse `text` with Gemini + MET table and store it for the sender."""
+    """Parse `text` with Gemini + MET table and store it for the sender.
+
+    This is the single entry point for both `/sport` and its prompt reply, so the "вчора" marker
+    is taken here: the text handed to Gemini then never carries it, which keeps the word out of
+    the activity title the model returns. `yesterday` lets a caller force the same thing.
+    """
     user = await ensure_user(message, repo, settings)
+    text, marked = strip_yesterday(text)
+    yesterday = yesterday or marked
     now = user_now(user, settings)
+    day = now.date() - timedelta(days=1) if yesterday else None
     previous = await repo.last_weight(user.user_id, now)
     entry = await ai.parse_sport(
         text, previous[1] if previous else None, on_retry=partial(message.reply, i18n.AI_RETRYING)
@@ -39,7 +55,13 @@ async def record_sport(
     # reply first, then store: the row is keyed to the confirmation the user will reply to,
     # exactly like `photos.record_food` does it
     reply = await message.reply(
-        i18n.sport_saved(entry.title, entry.minutes, entry.distance_km, entry.kcal)
+        i18n.sport_saved(
+            entry.title,
+            entry.minutes,
+            entry.distance_km,
+            entry.kcal,
+            day.isoformat() if day else None,
+        )
     )
     await repo.add_sport(
         user,
@@ -50,6 +72,7 @@ async def record_sport(
         now,
         source,
         message_id=reply.message_id,
+        day=day,
     )
 
 

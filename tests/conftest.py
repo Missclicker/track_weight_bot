@@ -83,6 +83,8 @@ class FakeRepo:
         source: str,
         message_id: int,
         photo_file_id: str = "",
+        *,
+        day: date | None = None,
     ) -> None:
         self._append(
             "food",
@@ -90,7 +92,7 @@ class FakeRepo:
                 # same precision as the real repo: `ts` is rendered as HH:MM by `/kcal`, so the
                 # fake must not feed the parser a shape production never writes
                 when.isoformat(timespec="seconds"),
-                when.date().isoformat(),
+                (day or when.date()).isoformat(),
                 user.user_id,
                 user.name,
                 est.dish,
@@ -119,12 +121,14 @@ class FakeRepo:
         when: datetime,
         source: str,
         message_id: int = 0,
+        *,
+        day: date | None = None,
     ) -> None:
         self._append(
             "sport",
             [
                 when.isoformat(),
-                when.date().isoformat(),
+                (day or when.date()).isoformat(),
                 user.user_id,
                 user.name,
                 activity,

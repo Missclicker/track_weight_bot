@@ -962,3 +962,110 @@ def test_kcal_today_renders_the_time_of_every_entry() -> None:
         "07:54 - 390 ккал - сирники",
         f"{i18n.KCAL_NO_TIME} - 20 ккал - чай",  # a row without a usable ts still shows up
     ]
+
+
+def _yesterday_iso(settings: Settings) -> str:
+    """Yesterday in the sender's timezone, computed the way the handlers compute it."""
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій")
+    return (user_now(me, settings).date() - timedelta(days=1)).isoformat()
+
+
+async def test_food_command_with_yesterday_is_dated_yesterday(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, session, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="млинці", kcal=500)]
+    await dp.feed_update(bot, _update("/їжа вчора млинці зі сметаною"))
+
+    row = repo.rows["food"][0]
+    yesterday = _yesterday_iso(settings)
+    assert row["date"] == yesterday
+    assert str(row["ts"]).startswith(user_now(User(ME, CHAT_ID, "x"), settings).date().isoformat())
+    assert ai.estimate_calls == ["млинці зі сметаною"]  # the marker never reached Gemini
+    reply = session.sent[-1]["text"]
+    assert reply.startswith(i18n.FOOD_PREFIX)
+    assert i18n.day_total(500, None, yesterday) in reply
+
+
+async def test_a_yesterday_total_counts_only_yesterday(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    """The running total follows the entry's own day, so today's meals must not be in it."""
+    dp, bot, session, ai = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій")
+    await repo.upsert_user(me)
+    now = user_now(me, settings)
+    await repo.add_food(me, FoodEstimate(dish="борщ", kcal=300), now - timedelta(days=1), "text", 8)
+    await repo.add_food(me, FoodEstimate(dish="омлет", kcal=900), now, "text", 9)
+
+    ai.food_estimates = [FoodEstimate(dish="млинці", kcal=500)]
+    await dp.feed_update(bot, _update("/їжа вчора млинці"))
+    assert i18n.day_total(800, None, _yesterday_iso(settings)) in session.sent[-1]["text"]
+
+
+async def test_sport_command_with_yesterday_is_dated_yesterday(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, session, ai = harness
+    await dp.feed_update(bot, _update("/спорт вчора волейбол 2 години"))
+
+    yesterday = _yesterday_iso(settings)
+    assert ai.sport_calls == ["волейбол 2 години"]
+    assert repo.rows["sport"][0]["date"] == yesterday
+    reply = session.sent[-1]["text"]
+    assert reply.startswith(i18n.SPORT_PREFIX) and reply.endswith(f"Записано за {yesterday}.")
+
+
+async def test_a_yesterday_reply_to_the_food_prompt_is_dated_yesterday(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, _, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="борщ", kcal=400)]
+    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    await dp.feed_update(bot, _update("вчора борщ", reply_to=prompt))
+
+    row = repo.rows["food"][0]
+    assert (row["date"], row["source"]) == (_yesterday_iso(settings), "prompt")
+    assert ai.estimate_calls == ["борщ"]
+
+
+async def test_a_photo_caption_saying_yesterday_is_dated_yesterday(
+    harness, repo: FakeRepo, settings: Settings, monkeypatch
+) -> None:
+    dp, bot, _, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="млинці", kcal=500)]
+
+    # MockSession has no file transport, so the download is stubbed out here
+    async def fake_download(file: Any, destination: Any) -> None:
+        destination.write(b"jpeg")
+
+    monkeypatch.setattr(bot, "download", fake_download)
+    await dp.feed_update(bot, _photo_update(caption="вчора млинці"))
+
+    assert ai.estimate_calls == ["млинці"]
+    assert repo.rows["food"][0]["date"] == _yesterday_iso(settings)
+
+
+async def test_a_bare_yesterday_command_asks_for_the_text(harness, repo: FakeRepo) -> None:
+    """ "/їжа вчора" still names no dish, so it behaves like the bare command."""
+    dp, bot, session, ai = harness
+    unused = FoodEstimate(dish="млинці", kcal=500)
+    ai.food_estimates = [unused]
+    await dp.feed_update(bot, _update("/їжа вчора"))
+    assert session.sent[-1]["text"] == i18n.FOOD_INPUT_PROMPT
+    assert ai.food_estimates == [unused] and repo.rows["food"] == []
+
+    await dp.feed_update(bot, _update("/спорт вчора", message_id=2))
+    assert session.sent[-1]["text"] == i18n.SPORT_INPUT_PROMPT
+    assert ai.sport_calls == [] and repo.rows["sport"] == []
+
+
+async def test_a_yesterday_food_row_can_still_be_deleted(harness, repo: FakeRepo) -> None:
+    dp, bot, session, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="млинці", kcal=500)]
+    await dp.feed_update(bot, _update("/їжа вчора млинці"))
+    estimate = _bot_message(session.sent[-1]["text"], 1001)
+
+    await dp.feed_update(bot, _update("видали", reply_to=estimate, message_id=2))
+    assert repo.rows["food"] == []
+    assert session.sent[-1]["text"].startswith(i18n.FOOD_DELETED)
