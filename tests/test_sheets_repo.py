@@ -6,7 +6,7 @@ row matching by string cells, upsert dedupe, ownership-scoped corrections, datet
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
@@ -102,6 +102,23 @@ async def test_update_food_kcal_is_scoped_to_owner(repo: SheetsRepo):
     assert food[1][col] == "900.0"  # Bob's row (same message_id, other chat) untouched
     assert food[2][col] == "350"
     assert await repo.update_food_kcal(user_id=3, message_id=42, kcal=1) is False
+
+
+async def test_day_backdates_the_date_column_but_not_ts(repo: SheetsRepo):
+    """A "вчора" entry: `date` is the day it counts towards, `ts` stays when it was typed."""
+    now = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+    user = User(user_id=1, chat_id=-100, name="A")
+    est = FoodEstimate(dish="млинці", kcal=400)
+    await repo.add_food(user, est, now, "text", 7, day=date(2026, 9, 18))
+    await repo.add_sport(user, "волейбол", 120, None, 500, now, "command", 8, day=date(2026, 9, 18))
+    await repo.add_food(user, FoodEstimate(dish="борщ", kcal=300), now, "text", 9)
+
+    food, sport = ws(repo, "food").rows, ws(repo, "sport").rows
+    ts, day = HEADERS["food"].index("ts"), HEADERS["food"].index("date")
+    assert (food[1][ts], food[1][day]) == ("2026-09-19T12:00:00+00:00", "2026-09-18")
+    assert (food[2][ts], food[2][day]) == ("2026-09-19T12:00:00+00:00", "2026-09-19")
+    ts, day = HEADERS["sport"].index("ts"), HEADERS["sport"].index("date")
+    assert (sport[1][ts], sport[1][day]) == ("2026-09-19T12:00:00+00:00", "2026-09-18")
 
 
 async def test_last_weight_orders_by_datetime_not_string(repo: SheetsRepo):

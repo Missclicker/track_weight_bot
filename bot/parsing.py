@@ -256,11 +256,17 @@ def is_food_cancel_request(text: str | None) -> bool:
     return " ".join(tokens) in FOOD_CANCEL_PHRASES
 
 
-# The marker that moves an entry to the previous day. Matched by whole words only, with any
-# punctuation glued to it swallowed along the way ("вчора," reads as the same word): a substring
-# match would shift "позавчора борщ" by one day instead of two and turn "вчорашній борщ" - a
-# dish cooked yesterday and eaten now - into a backdated record.
-_YESTERDAY = re.compile(r"(?<![\w'’ʼ])(?:вчора|учора|yesterday)(?![\w'’ʼ])[\s,;.!]*", re.IGNORECASE)
+# The marker that moves an entry to the previous day. Matched by whole words only, with the
+# punctuation people glue to either side swallowed along the way ("вчора, млинці", "вчора -
+# млинці", "млинці, вчора" all leave a clean dish): a substring match would shift "позавчора
+# борщ" by one day instead of two and turn "вчорашній борщ" - a dish cooked yesterday and eaten
+# now - into a backdated record.
+_YESTERDAY = re.compile(
+    r"""[\s,;:.!—–-]*
+    (?<![\w'’ʼ])(?:вчора|учора|yesterday)(?![\w'’ʼ])
+    [\s,;:.!—–-]*""",
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
 def strip_yesterday(text: str | None) -> tuple[str, bool]:
