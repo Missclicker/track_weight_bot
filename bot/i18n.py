@@ -26,6 +26,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "today": ("today", "sohodni", "сьогодні"),
     "kcal": ("kcal", "kalorii", "калорії"),
     "target": ("target", "tsil", "ціль"),
+    "profile": ("profile", "profil", "профіль"),
     "week": ("week", "tyzhden", "тиждень", "звіт"),
     "water": ("water", "voda", "вода"),
 }
@@ -45,6 +46,8 @@ HELP = (
     "/today або /сьогодні - мій підсумок за сьогодні\n"
     "/kcal або /калорії - що я з'їв сьогодні і скільки це ккал\n"
     "/target 2000 або /ціль 2000 - денна ціль ккал (необов'язково; /ціль стоп - прибрати)\n"
+    "/profile 1981 ч 180 або /профіль ... - рік народження, стать і зріст для тижневого звіту "
+    "(необов'язково; /профіль стоп - прибрати)\n"
     "/week або /тиждень - звіт за 7 останніх повних днів (без сьогодні)\n"
     "/water будні з 9 до 18 кожні 30 хв або /вода ... - нагадування пити воду в особисті\n"
     "/help або /довідка - ця довідка\n\n"
@@ -219,6 +222,37 @@ TARGET_CLEARED = "Прибрав денну ціль. Далі просто ра
 TARGET_CURRENT = "Твоя денна ціль: {kcal} ккал. Змінити: /ціль 1800. Прибрати: /ціль стоп."
 TARGET_NONE = "Денної цілі немає. Задати: /ціль 2000."
 
+PROFILE_USAGE = (
+    "Профіль для тижневого звіту, необов'язковий: рік народження (або вік), стать і зріст - "
+    "у будь-якому порядку, можна й лише щось одне.\n"
+    "/профіль 1981 ч 180\n"
+    "/profile 45 жінка 165,5 см\n"
+    "/профіль 182 - змінити лише зріст\n\n"
+    "Рік народження: від {year_lo} до {year_hi}, або вік: від {age_lo} до {age_hi}.\n"
+    "Стать: ч, чоловіча, m або ж, жіноча, f.\n"
+    "Зріст: від {height_lo} до {height_hi} см.\n"
+    "Звіт бере з профілю особисту норму білка й оцінку витрати енергії. Прибрати: /профіль стоп."
+)
+PROFILE_SET = (
+    "Записав профіль: {profile}.\n"
+    "Він необов'язковий: тижневий звіт візьме з нього особисту норму білка й оцінку витрати "
+    "енергії. Прибрати: /профіль стоп."
+)
+PROFILE_CLEARED = "Прибрав профіль. Тижневий звіт обійдеться без нього."
+PROFILE_CURRENT = (
+    "Твій профіль: {profile}.\n"
+    "Він необов'язковий: тижневий звіт бере з нього особисту норму білка й оцінку витрати "
+    "енергії.\n"
+    "Змінити: /профіль 1981 ч 180 (можна й одне поле, наприклад /профіль 45). "
+    "Прибрати: /профіль стоп."
+)
+PROFILE_NONE = (
+    "Профілю немає, він необов'язковий. З роком народження, статтю і зростом тижневий звіт "
+    "порахує особисту норму білка й оцінку витрати енергії.\n"
+    "Задати: /профіль 1981 ч 180 (або вік замість року: /профіль 45 ж 165)."
+)
+_SEX_NAMES = {"m": "чоловіча", "f": "жіноча"}
+
 
 def fmt_kg(value: float) -> str:
     return f"{value:.1f}".rstrip("0").rstrip(".") if value != int(value) else f"{value:.0f}"
@@ -227,6 +261,27 @@ def fmt_kg(value: float) -> str:
 def fmt_delta(value: float) -> str:
     sign = "+" if value > 0 else "-"
     return f"{sign}{abs(value):.1f}"
+
+
+def fmt_profile(
+    birth_year: int | None, sex: str | None, height_cm: float | None, current_year: int
+) -> str:
+    """One line, "рік народження 1981 (45 р.), стать чоловіча, зріст 180 см"; unknown fields are
+    left out, and nothing known at all gives "".
+
+    The age is `current_year - birth_year`, which is what `/profile 45` stored - so the reply
+    confirms the age the user typed, while the year says what the report will actually use.
+    """
+    parts: list[str] = []
+    if birth_year is not None:
+        age = current_year - birth_year
+        # a hand-typed year in the future would read as a negative age
+        parts.append(f"рік народження {birth_year}" + (f" ({age} р.)" if age > 0 else ""))
+    if sex in _SEX_NAMES:
+        parts.append(f"стать {_SEX_NAMES[sex]}")
+    if height_cm is not None:
+        parts.append(f"зріст {fmt_kg(height_cm)} см")  # "180", "180.5": same shape as a weight
+    return ", ".join(parts)
 
 
 def _target_suffix(daily_target: float | None) -> str:

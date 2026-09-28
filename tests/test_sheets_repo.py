@@ -14,7 +14,7 @@ from gspread.exceptions import APIError
 
 from bot.ai import FoodEstimate
 from bot.config import Settings
-from bot.parsing import parse_water_schedule
+from bot.parsing import parse_profile, parse_water_schedule
 from bot.sheets import HEADERS, SheetsRepo, User, WaterSubscription, explain_startup_error
 
 
@@ -344,6 +344,143 @@ async def test_set_daily_kcal_target_writes_only_that_cell(repo: SheetsRepo) -> 
     assert ws.rows[1][HEADERS["users"].index("daily_kcal_target")] == ""
 
     assert await repo.set_daily_kcal_target(2, -100, 2000) is False  # unknown user
+
+
+async def test_set_profile_writes_its_three_cells_on_every_row_of_the_user(
+    repo: SheetsRepo, monkeypatch: pytest.MonkeyPatch
+):
+    # the same person in a group and in a DM, plus somebody else in the group
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A", tz="Europe/Kyiv"))
+    await repo.upsert_user(User(user_id=1, chat_id=1, name="A", tz="Europe/Warsaw"))
+    await repo.upsert_user(User(user_id=2, chat_id=-100, name="B", birth_year=1990, sex="f"))
+    sheet = ws(repo, "users")
+    sheet.rows[1][HEADERS["users"].index("daily_kcal_target")] = "2000"  # hand-edited, per chat
+    sheet.rows[2][HEADERS["users"].index("target_kg")] = "80"
+    before = [list(row) for row in sheet.rows]
+    batches: list[int] = []
+    batch_update = sheet.batch_update
+
+    def counted_batch_update(data: list[dict[str, Any]]) -> None:
+        batches.append(len(data))
+        batch_update(data)
+
+    monkeypatch.setattr(sheet, "batch_update", counted_batch_update)
+
+    assert await repo.set_profile(1, 1981, "m", 180) == 2
+    assert batches == [6]  # both rows' three cells in one request, not a request per row
+    profile = [HEADERS["users"].index(c) for c in ("birth_year", "sex", "height_cm")]
+    for row_no in (1, 2):
+        assert [sheet.rows[row_no][c] for c in profile] == ["1981", "m", "180"]
+        others = [i for i in range(len(HEADERS["users"])) if i not in profile]
+        assert [sheet.rows[row_no][i] for i in others] == [before[row_no][i] for i in others]
+    assert sheet.rows[3] == before[3]  # the other user's row is not touched at all
+
+    group, dm = await repo.get_user(1, -100), await repo.get_user(1, 1)  # the cache was dropped
+    assert group is not None and dm is not None
+    assert (group.birth_year, group.sex, group.height_cm) == (1981, "m", 180)
+    assert (dm.birth_year, dm.sex, dm.height_cm) == (1981, "m", 180)
+    assert (group.daily_kcal_target, dm.tz) == (2000, "Europe/Warsaw")
+
+    assert await repo.set_profile(1, None, None, None) == 2  # None clears the cell
+    assert [sheet.rows[1][c] for c in profile] == ["", "", ""]
+    cleared = await repo.get_user(1, 1)
+    assert cleared is not None
+    assert (cleared.birth_year, cleared.sex, cleared.height_cm) == (None, None, None)
+
+    assert await repo.set_profile(3, 1981, "m", 180) == 0  # unknown user
+    assert len(sheet.rows) == 4
+    assert batches == [6, 6]  # the clear above; an unknown user sends nothing at all
+
+
+async def test_a_blank_profile_cell_is_filled_from_the_persons_other_rows(repo: SheetsRepo):
+    sheet = ws(repo, "users")
+    for user in (
+        # the group row holds the profile and a target, the DM row was registered blank, and a
+        # second group's row has a height of its own typed in by hand
+        User(1, -100, "A", birth_year=1981, sex="m", height_cm=180, daily_kcal_target=2000),
+        User(1, 1, "A"),
+        User(1, -200, "A", height_cm=175),
+        # somebody else in the same group, with a profile of their own, and a person with none
+        User(2, -100, "B", birth_year=1990, sex="f", height_cm=165),
+        User(2, 2, "B"),
+        User(3, -100, "C"),
+    ):
+        sheet.append_row(user.to_row(), "RAW")
+    before = [list(row) for row in sheet.rows]
+
+    async def profile(user_id: int, chat_id: int) -> tuple[int | None, str | None, float | None]:
+        user = await repo.get_user(user_id, chat_id)
+        assert user is not None
+        return user.birth_year, user.sex, user.height_cm
+
+    assert await profile(1, 1) == (1981, "m", 180)  # the DM answers with the group's profile
+    assert await profile(1, -200) == (1981, "m", 175)  # a row's own cell beats the other rows
+    assert await profile(1, -100) == (1981, "m", 180)  # ... both ways, not the later 175
+    assert await profile(2, 2) == (1990, "f", 165)  # only the same user_id's rows count
+    assert await profile(3, -100) == (None, None, None)
+
+    dm = await repo.get_user(1, 1)
+    assert dm is not None and dm.daily_kcal_target is None  # per chat: not the group's 2000
+    assert sheet.rows == before  # filled on read only, nothing is written back
+
+
+async def test_an_age_sent_from_the_dm_keeps_the_sex_and_height_set_in_the_group(repo: SheetsRepo):
+    """The reported loss, end to end: the profile was set in the group, the DM row registered
+    blank afterwards, and `/profile 45` from the DM merged those blanks over the group row."""
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A"))
+    assert await repo.set_profile(1, 1981, "m", 180) == 1  # only the group row exists yet
+    await repo.upsert_user(User(user_id=1, chat_id=1, name="A"))  # the first message in the DM
+
+    # what `cmd_profile` does with "/profile 45" sent from the DM
+    user = await repo.get_user(1, 1)
+    update = parse_profile("45", 2026)
+    assert user is not None and update is not None
+    assert (update.sex, update.height_cm) == (None, None)  # the message names the age alone
+    birth_year = update.birth_year if update.birth_year is not None else user.birth_year
+    sex = update.sex if update.sex is not None else user.sex
+    height_cm = update.height_cm if update.height_cm is not None else user.height_cm
+    assert await repo.set_profile(1, birth_year, sex, height_cm) == 2
+
+    for row in ws(repo, "users").rows[1:]:  # each row on its own, without the fill on read
+        stored = User.from_record(dict(zip(HEADERS["users"], row, strict=True)))
+        assert (stored.birth_year, stored.sex, stored.height_cm) == (1981, "m", 180)
+
+
+async def test_upsert_user_keeps_a_hand_edited_profile(repo: SheetsRepo):
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A", tz="Europe/Kyiv"))
+    sheet = ws(repo, "users")
+    sheet.rows[1][HEADERS["users"].index("birth_year")] = "1981"
+    sheet.rows[1][HEADERS["users"].index("sex")] = "Жінка"  # any spelling parse_sex takes
+    sheet.rows[1][HEADERS["users"].index("height_cm")] = "165,5"
+
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A renamed"))
+    user = await repo.get_user(1, -100)
+    assert user is not None and user.name == "A renamed"
+    assert (user.birth_year, user.sex, user.height_cm) == (1981, "f", 165.5)
+    assert sheet.rows[1][HEADERS["users"].index("sex")] == "f"  # rewritten in canonical form
+
+
+def test_user_profile_round_trips_and_a_legacy_row_still_loads() -> None:
+    user = User(user_id=1, chat_id=-100, name="A", height_cm=180, birth_year=1981, sex="m")
+    row = [str(v) for v in user.to_row()]  # the sheet hands every cell back as a string
+    assert row[-2:] == ["1981", "m"]
+    back = User.from_record(dict(zip(HEADERS["users"], row, strict=True)))
+    assert (back.birth_year, back.sex, back.height_cm) == (1981, "m", 180)
+
+    # a row written before the two columns existed: ten cells, nothing after daily_kcal_target
+    legacy = ["1", "-100", "A", "", "Europe/Kyiv", "TRUE", "", "180", "80", "2000"]
+    old = User.from_record(dict(zip(HEADERS["users"], legacy, strict=False)))
+    assert (old.birth_year, old.sex) == (None, None)
+    assert (old.height_cm, old.daily_kcal_target) == (180, 2000)
+
+
+@pytest.mark.parametrize(
+    ("cell", "expected"),
+    [("1981", 1981), ("1981.0", 1981), ("81", None), ("1981.5", None), ("3000", None), ("", None)],
+)
+def test_user_birth_year_takes_only_a_plausible_whole_year(cell: str, expected: int | None):
+    user = User.from_record({"user_id": "1", "chat_id": "-100", "birth_year": cell})
+    assert user.birth_year == expected
 
 
 def test_num_or_none_rejects_nan_and_inf() -> None:

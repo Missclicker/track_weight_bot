@@ -46,6 +46,8 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    kalorii - Те саме, що /kcal
    target - Денна ціль ккал (необов'язково): /target 2000, прибрати: /target стоп
    tsil - Те саме, що /target
+   profile - Профіль для тижневого звіту: /profile 1981 ч 180
+   profil - Те саме, що /profile
    week - Звіт за 7 останніх повних днів
    tyzhden - Те саме, що /week
    water - Нагадування пити воду: /water будні з 9 до 18 кожні 30 хв
@@ -54,7 +56,7 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    dovidka - Те саме, що /help
    ```
 
-   Every command also has a Cyrillic spelling the bot understands when typed — `/вага`, `/їжа`, `/спорт`, `/сьогодні`, `/калорії`, `/ціль`, `/тиждень`, `/вода`, `/довідка`, `/старт` — but Telegram only allows `a-z 0-9 _` in registered commands, so those cannot go into `/setcommands` and won't autocomplete. The full alias table is `COMMANDS` in `bot/i18n.py`.
+   Every command also has a Cyrillic spelling the bot understands when typed — `/вага`, `/їжа`, `/спорт`, `/сьогодні`, `/калорії`, `/ціль`, `/профіль`, `/тиждень`, `/вода`, `/довідка`, `/старт` — but Telegram only allows `a-z 0-9 _` in registered commands, so those cannot go into `/setcommands` and won't autocomplete. The full alias table is `COMMANDS` in `bot/i18n.py`.
 
 ### 2. Telegram group + privacy mode
 
@@ -86,7 +88,7 @@ Sheet layout (for reference / manual edits):
 
 | tab       | columns                                                                                                                                             |
 | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `users`   | `user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg, daily_kcal_target`                                                  |
+| `users`   | `user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg, daily_kcal_target, birth_year, sex`                                 |
 | `weight`  | `ts, date, user_id, name, kg, source`                                                                                                               |
 | `food`    | `ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g, veg_share, confidence, source, message_id, corrected, photo_file_id, portion` |
 | `sport`   | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source, message_id`                                                                 |
@@ -263,7 +265,7 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | reply to the bot's food estimate with a number                                                                     | sets kcal of that estimate — `84` stays 84 kcal, because the weight range overlaps plausible portions |
 | reply to the bot's food estimate with a number that says kilograms: `84.3`, `84 кг`, `вага 84`     | weight (`source` = `reply`)                                 |
 | reply to the bot's food estimate with text (weight, ingredients, dish name)                                        | Gemini re-estimates it (with the photo) and updates the row |
-| `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                     |
+| `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/profile`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                     |
 | `/water …` / `/вода …` (in the group or in the DM)                                                                 | water reminder schedule → `water`                           |
 | `/sport біг 5 км 30 хв` (`/спорт …`)                                                                               | Gemini text parse → `sport`                                 |
 | `/їжа вчора млинці зі сметаною` (`/спорт вчора волейбол 2 години`), or "вчора" in a photo caption or a prompt reply | the same record, but dated **yesterday** in the user's timezone (`ts` still says when it was sent); the word is stripped before Gemini sees the text, and the reply names the date |
@@ -280,7 +282,7 @@ log a workout by mistake, so an activity is only recorded through `/sport` or a 
 Deleting is a real delete: the row disappears from the tab, so every total and the weekly report
 are right again immediately. Only the author of an entry can delete it.
 
-You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target` and `active` there can be edited by hand and are preserved; `daily_kcal_target` is also set from the chat with `/target 2000` (`/ціль 2000`) and cleared with `/target стоп`. It is optional: without it the bot just counts, with it every food reply, `/kcal` and `/today` show `(ціль N)`.
+You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target`, `birth_year`, `sex` and `active` there can be edited by hand and are preserved; `daily_kcal_target` is also set from the chat with `/target 2000` (`/ціль 2000`) and cleared with `/target стоп`. It is optional: without it the bot just counts, with it every food reply, `/kcal` and `/today` show `(ціль N)`. The person's profile for the weekly report — `birth_year`, `sex` (`m`/`f`; a hand-typed `ч`/`ж` is understood too) and `height_cm` — is optional as well; from the chat it is set with `/profile 1981 ч 180` (`/профіль 45 ж 165`: any order, any subset, an age is stored as a birth year and the fields not named are kept) and cleared with `/профіль стоп`. Unlike the per-chat target it describes the person, so `/profile` writes those three cells on every `users` row of the sender — the group one and the DM one alike — and a profile cell left blank on one row (typed by hand into the group row only, say) is filled from the person's other rows.
 
 ## Water reminders
 

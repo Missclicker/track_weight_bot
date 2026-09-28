@@ -26,8 +26,9 @@ from bot.ai import FoodEstimate, ModelOverloaded, QuotaExceeded, RetryNotice, Sp
 from bot.config import Settings
 from bot.handlers import build_router
 from bot.scheduler import user_now
-from bot.sheets import User
+from bot.sheets import HEADERS, SheetsRepo, User
 from tests.conftest import FakeRepo, client_with, server_error
+from tests.test_sheets_repo import FakeWorksheet
 
 BOT_ID = 123  # derived from the token "123:abc"
 CHAT_ID = -100
@@ -738,6 +739,113 @@ async def test_target_command_sets_shows_and_clears(harness, repo: FakeRepo, set
     assert "ціль" not in session.sent[-1]["text"]
 
 
+async def test_profile_command_sets_shows_changes_and_clears(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, session, _ = harness
+
+    async def profile() -> tuple[int | None, str | None, float | None]:
+        me = await repo.get_user(ME, CHAT_ID)
+        assert me is not None
+        return me.birth_year, me.sex, me.height_cm
+
+    await dp.feed_update(bot, _update("/профіль"))
+    assert session.sent[-1]["text"] == i18n.PROFILE_NONE  # auto-registered, nothing set yet
+    me = await repo.get_user(ME, CHAT_ID)
+    assert me is not None
+    year = user_now(me, settings).year
+
+    await dp.feed_update(bot, _update("/profile 1981 ч 180", message_id=2))
+    assert await profile() == (1981, "m", 180)
+    stored = f"рік народження 1981 ({year - 1981} р.), стать чоловіча, зріст 180 см"
+    assert session.sent[-1]["text"] == i18n.PROFILE_SET.format(profile=stored)
+
+    await dp.feed_update(bot, _update("/профіль", message_id=3))
+    assert session.sent[-1]["text"] == i18n.PROFILE_CURRENT.format(profile=stored)
+
+    # an age alone moves the birth year and keeps what the message did not mention
+    await dp.feed_update(bot, _update("/profile 45", message_id=4))
+    assert await profile() == (year - 45, "m", 180)
+    changed = f"рік народження {year - 45} (45 р.), стать чоловіча, зріст 180 см"
+    assert session.sent[-1]["text"] == i18n.PROFILE_SET.format(profile=changed)
+
+    # a message that does not parse stores nothing - not even the part of it that would
+    await dp.feed_update(bot, _update("/profile абв", message_id=5))
+    usage = session.sent[-1]["text"]
+    assert usage.startswith("Профіль для тижневого звіту")
+    assert f"від {year - 100} до {year - 14}" in usage and "від 120 до 230 см" in usage
+    await dp.feed_update(bot, _update("/profil 1990 абв", message_id=6))
+    assert session.sent[-1]["text"] == usage
+    assert await profile() == (year - 45, "m", 180)
+
+    await dp.feed_update(bot, _update("/profile стоп", message_id=7))
+    assert session.sent[-1]["text"] == i18n.PROFILE_CLEARED
+    assert await profile() == (None, None, None)
+    await dp.feed_update(bot, _update("/профіль", message_id=8))
+    assert session.sent[-1]["text"] == i18n.PROFILE_NONE
+
+
+def _real_repo_dispatcher(settings: Settings) -> tuple[Dispatcher, Bot, MockSession, SheetsRepo]:
+    """The Dispatcher over a real `SheetsRepo`, serving the group and the DM of `ME`.
+
+    `FakeRepo` keeps one row per user, so a person with a group row *and* a DM row - the case
+    `/profile` must not lose data in - only exists on the real repo over in-memory worksheets.
+    """
+    settings = settings.model_copy(update={"allowed_chat_ids": {CHAT_ID, ME}})
+    repo = SheetsRepo(settings)
+    repo._worksheets = {tab: FakeWorksheet(h) for tab, h in HEADERS.items()}  # type: ignore[misc]
+    session = MockSession()
+    bot = Bot("123:abc", session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot._me = TgUser(id=BOT_ID, is_bot=True, first_name="Bot", username="bot")
+    dp = Dispatcher(repo=repo, ai=FakeAI(), settings=settings, jobs=FakeJobs())
+    dp.include_router(build_router())
+    return dp, bot, session, repo
+
+
+def _profile_cells(repo: SheetsRepo) -> list[tuple[str, str, float | None]]:
+    """The raw `(birth_year, sex, height_cm)` cells of every `users` row, in sheet order."""
+    rows = repo._worksheets["users"].rows[1:]  # type: ignore[attr-defined]
+    at = {col: HEADERS["users"].index(col) for col in ("birth_year", "sex", "height_cm")}
+    return [
+        (
+            r[at["birth_year"]],
+            r[at["sex"]],
+            float(r[at["height_cm"]]) if r[at["height_cm"]] else None,
+        )
+        for r in rows
+    ]
+
+
+@pytest.mark.parametrize("first_dm_message", ["/profile 45", "/профіль"])
+async def test_a_first_profile_message_in_the_dm_keeps_the_group_profile(
+    settings: Settings, first_dm_message: str
+) -> None:
+    """On first contact `ensure_user` hands back the blank row it has just built; `/profile` must
+    read the stored one back, which already carries the profile set in the group, or merging those
+    blanks writes them over every row of the person."""
+    dp, bot, session, repo = _real_repo_dispatcher(settings)
+    await dp.feed_update(bot, _update("/profile 1981 ч 180"))
+    assert _profile_cells(repo) == [("1981", "m", 180)]
+
+    # the person's very first message in the DM: there is no DM row yet
+    await dp.feed_update(
+        bot, _update(first_dm_message, chat_id=ME, chat_type="private", message_id=2)
+    )
+
+    me = await repo.get_user(ME, ME)
+    assert me is not None
+    year = user_now(me, settings).year
+    if first_dm_message == "/profile 45":
+        # only the birth year moved, on both rows; sex and height survived
+        assert _profile_cells(repo) == [(str(year - 45), "m", 180)] * 2
+        profile = i18n.fmt_profile(year - 45, "m", 180, year)
+        assert session.sent[-1]["text"] == i18n.PROFILE_SET.format(profile=profile)
+    else:
+        # the DM shows the profile set in the group instead of "no profile"
+        profile = i18n.fmt_profile(1981, "m", 180, year)
+        assert session.sent[-1]["text"] == i18n.PROFILE_CURRENT.format(profile=profile)
+
+
 async def test_reply_videly_deletes_the_food_row(harness, repo: FakeRepo, settings: Settings):
     dp, bot, session, ai = harness
     me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій", daily_kcal_target=2000)
@@ -954,6 +1062,16 @@ def test_target_suffix_hides_missing_or_broken_targets() -> None:
     assert "nan" not in i18n.kcal_today("A", "2026-09-10", items, float("nan"))
     assert "ціль" not in i18n.today_summary("A", "d", 100, 0, 0, 0, None, 1, float("nan"))
     assert "(ціль 1800)" in i18n.day_total(100, 1800)
+
+
+def test_fmt_profile_names_only_the_known_fields() -> None:
+    full = i18n.fmt_profile(1981, "m", 180, 2026)
+    assert full == "рік народження 1981 (45 р.), стать чоловіча, зріст 180 см"
+    assert i18n.fmt_profile(None, "f", None, 2026) == "стать жіноча"
+    assert i18n.fmt_profile(None, None, 180.5, 2026) == "зріст 180.5 см"
+    # a hand-typed year in the future would be a negative age: the year alone is shown
+    assert i18n.fmt_profile(2030, None, None, 2026) == "рік народження 2030"
+    assert i18n.fmt_profile(None, None, None, 2026) == ""
 
 
 def test_kcal_today_renders_the_time_of_every_entry() -> None:

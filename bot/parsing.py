@@ -115,6 +115,110 @@ def is_target_clear_request(text: str | None) -> bool:
     return bool(text) and text.strip().lower().rstrip(".!") in TARGET_CLEAR_WORDS
 
 
+# -- profile (birth year, sex, height) -----------------------------------------------------------
+
+PROFILE_AGE_MIN, PROFILE_AGE_MAX = 14, 100
+HEIGHT_CM_MIN, HEIGHT_CM_MAX = 120, 230
+
+_SEX_WORDS = {
+    **dict.fromkeys(("m", "male", "man", "ч", "чол", "чоловік", "чоловіча"), "m"),
+    **dict.fromkeys(("f", "female", "woman", "ж", "жін", "жінка", "жіноча"), "f"),
+}
+# Labels people put around the values ("рік народження 1981, зріст 180 см"): they carry no value
+# of their own, so they are skipped, while every other unknown word rejects the whole message.
+_PROFILE_FILLERS = frozenset(
+    {
+        "рік",
+        "року",
+        "р",
+        "народження",
+        "born",
+        "year",
+        "age",
+        "вік",
+        "років",
+        "роки",
+        "р.н",  # "1981 р.н.": the trailing dot is stripped off the token first
+        "н",  # ... and "1981 р. н.", spaced
+        "зріст",
+        "height",
+        "стать",
+        "sex",
+        "см",
+        "cm",
+    }
+)
+# Whitespace, semicolons, colons ("зріст:180") and commas separate the values - except a decimal
+# comma ("180,5"): one between a digit and exactly one more digit that ends the number, since a
+# height is never typed to more than a millimetre. "180,45" (a height and an age) and "1981,180"
+# are two values.
+_PROFILE_SPLIT = re.compile(r"[\s;:]+|(?<!\d),|,(?!\d(?!\d))")
+_PROFILE_NUMBER = re.compile(r"(?P<num>\d+(?P<dec>[.,]\d+)?)(?P<unit>см|cm)?")
+
+
+def parse_sex(value: object) -> str | None:
+    """A sheet cell or a typed word -> "m" / "f"; None when it names neither."""
+    if value is None:
+        return None
+    return _SEX_WORDS.get(str(value).strip().lower().rstrip(".!").strip())
+
+
+@dataclass(frozen=True)
+class ProfileUpdate:
+    """The profile fields a `/profile` message named; None means "not mentioned"."""
+
+    birth_year: int | None = None
+    sex: str | None = None
+    height_cm: float | None = None
+
+
+def _profile_number(token: str, current_year: int) -> tuple[str, float] | None:
+    """The field a numeric token fills and its value, or None when it fits no range."""
+    match = _PROFILE_NUMBER.fullmatch(token)
+    if match is None:
+        return None
+    value = _to_float(match.group("num"))
+    if match.group("unit") or match.group("dec"):
+        # a unit or a fraction can only be a height: an age and a year are whole numbers
+        return ("height_cm", value) if HEIGHT_CM_MIN <= value <= HEIGHT_CM_MAX else None
+    if len(match.group("num")) == 4:
+        year = int(value)
+        if current_year - PROFILE_AGE_MAX <= year <= current_year - PROFILE_AGE_MIN:
+            return "birth_year", year
+        return None
+    if PROFILE_AGE_MIN <= value <= PROFILE_AGE_MAX:
+        return "birth_year", current_year - int(value)
+    if HEIGHT_CM_MIN <= value <= HEIGHT_CM_MAX:
+        return "height_cm", value
+    return None
+
+
+def parse_profile(text: str | None, current_year: int) -> ProfileUpdate | None:
+    """Parse "/профіль 1981 ч 180" (any order, any subset) into the fields it names.
+
+    A number is read by its range: a four-digit one is a birth year, 14..100 an age (turned into
+    a birth year, which may be a year off - the reply shows what was stored), 120..230 a height
+    in cm ("180см", "180,5" too). Returns None unless *every* token is a value or a known label
+    and each field is given at most once: a typo must not be half-applied, silently keeping the
+    fields that happened to parse.
+    """
+    if not text:
+        return None
+    fields: dict[str, Any] = {}
+    for raw in _PROFILE_SPLIT.split(text.strip().lower()):
+        token = raw.rstrip(".!")  # "1981 р.н."
+        if not token or token in _PROFILE_FILLERS:
+            continue
+        sex = parse_sex(token)
+        found = ("sex", sex) if sex is not None else _profile_number(token, current_year)
+        if found is None or found[0] in fields:
+            return None
+        fields[found[0]] = found[1]
+    if not fields:
+        return None
+    return ProfileUpdate(**fields)
+
+
 # A reply asking for a record to be thrown away: a verb from `DELETE_WORDS`, optionally padded
 # with words that carry no information ("видали цей запис", "delete this please"). Anything else
 # in the message disqualifies it, because a stray noun changes the meaning entirely: "прибери

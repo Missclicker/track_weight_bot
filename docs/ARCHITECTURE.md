@@ -19,7 +19,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/__main__.py` | Entry point. Loads settings (fails fast with a readable message), ensures the sheet schema, builds `Bot`/`Dispatcher`, injects dependencies, starts the scheduler and polling. |
 | `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist. |
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
-| `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
+| `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `parse_profile` (birth year or age, sex and height in any order, all-or-nothing, + the `ProfileUpdate` value object) / `parse_sex` (a typed word or a `users.sex` cell -> `"m"`/`"f"`), `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
@@ -37,10 +37,15 @@ private chat whose id is listed - e.g. the owner testing in a DM - is served lik
 told the bot can now DM them, anybody else gets "works only in the group") and `/вода`.
 Inside `guarded` the routers are tried in order:
 
-1. `commands` - `/start /help /w /food /sport /today /kcal /target /week`. `/target` writes
-   only the `daily_kcal_target` cell (`set_daily_kcal_target`), so other hand-edited columns
-   are untouched; the target is optional and `i18n._target_suffix` hides it when it is
-   missing, zero or not a finite number. `/food` and food photos
+1. `commands` - `/start /help /w /food /sport /today /kcal /target /profile /week`. `/target`
+   writes only the `daily_kcal_target` cell (`set_daily_kcal_target`), so other hand-edited
+   columns are untouched; the target is optional and `i18n._target_suffix` hides it when it is
+   missing, zero or not a finite number. `/profile` (`/профіль 1981 ч 180`) stores the optional
+   birth year, sex and height the weekly report can use: it merges what the message names into
+   the sender's current values and `set_profile` writes only those three cells, but on *every*
+   `users` row of the user - they describe the person, not their membership of one chat, and a
+   DM must not disagree with the group about somebody's age. A message `parse_profile` cannot
+   read in full is answered with the usage text and stores nothing. `/food` and food photos
    share `photos.record_food`, which reads the sender's food rows for today so the `≈` reply
    ends with "Разом за сьогодні: N ккал" (the new entry included); `/kcal` lists those rows, each
    line starting with the time it was logged at ("07:54 - 390 ккал - ..."), read straight off the
@@ -109,7 +114,12 @@ Anything unmatched is ignored.
 
 **Users.** Nobody has to run `/start`: the first weight/food/sport message registers the sender
 (`ensure_user`). The `users` tab is editable by hand - `tz`, `height_cm`, `target_kg`,
-`daily_kcal_target`, `active` are preserved on upsert.
+`daily_kcal_target`, `birth_year`, `sex`, `active` are preserved on upsert. `birth_year` and
+`sex` are trailing columns (see *Trailing columns*); a hand-typed cell counts only when it makes
+sense - a whole year in 1900..2100, a sex word `parse_sex` knows - and is otherwise read as
+unknown. A blank `birth_year`, `sex` or `height_cm` cell on one row is filled on read from the
+person's other rows (`_all_users_sync`; the row's own value wins), so every row of a person
+answers with the same profile and `/profile 45` from the DM merges the group's values, not blanks.
 
 **Dates.** Every timestamp is written in the user's timezone (`users.tz`, fallback
 `DEFAULT_TZ`) and "today" is computed there. The `date` column is the lookup key for all
@@ -230,9 +240,10 @@ self-healing conditions, not bugs to hunt. The polling loop never dies
 because of a handler.
 
 **Trailing columns.** `food.portion` (the portion size the model priced, shown on the `≈` line so
-the user can see what the calories were computed for) and `sport.message_id` (the confirmation a
-delete replies to) are the *last* entries of their `HEADERS` lists: an existing spreadsheet then
-only gains a trailing column instead of having every value shifted right.
+the user can see what the calories were computed for), `sport.message_id` (the confirmation a
+delete replies to) and `users.birth_year` / `users.sex` (the profile for the weekly report) are
+the *last* entries of their `HEADERS` lists: an existing spreadsheet then only gains a trailing
+column instead of having every value shifted right.
 
 **Sheets writes.** Everything is appended with `value_input_option=RAW`: names and dishes can
 never be evaluated as formulas, and the ISO `date`/`ts` strings we filter on are not re-formatted

@@ -7,7 +7,7 @@ blocking call in a worker thread so handlers never block the event loop. Transie
 Tab layout (headers must match the README):
 
     users   user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg,
-            daily_kcal_target
+            daily_kcal_target, birth_year, sex
     weight  ts, date, user_id, name, kg, source
     food    ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g,
             veg_share, confidence, source, message_id, corrected, photo_file_id, portion
@@ -24,7 +24,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -35,7 +35,7 @@ from gspread.utils import ValueRenderOption
 
 from bot.ai import FoodEstimate
 from bot.config import WEEKDAYS, Settings, parse_hhmm
-from bot.parsing import WATER_MAX_INTERVAL_MIN, WATER_MIN_INTERVAL_MIN, WaterSchedule
+from bot.parsing import WATER_MAX_INTERVAL_MIN, WATER_MIN_INTERVAL_MIN, WaterSchedule, parse_sex
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +58,9 @@ HEADERS: dict[str, list[str]] = {
         "height_cm",
         "target_kg",
         "daily_kcal_target",
+        # the person's profile for the weekly report, trailing like `food.portion` below
+        "birth_year",
+        "sex",
     ],
     "weight": ["ts", "date", "user_id", "name", "kg", "source"],
     "food": [
@@ -127,6 +130,8 @@ class User:
     height_cm: float | None = None
     target_kg: float | None = None
     daily_kcal_target: float | None = None
+    birth_year: int | None = None
+    sex: str | None = None  # "m" / "f"
 
     def to_row(self) -> list[Any]:
         return [
@@ -140,10 +145,16 @@ class User:
             _blank(self.height_cm),
             _blank(self.target_kg),
             _blank(self.daily_kcal_target),
+            _blank(self.birth_year),
+            self.sex or "",
         ]
 
     @classmethod
     def from_record(cls, rec: dict[str, Any]) -> User:
+        year = num_or_none(rec.get("birth_year"))
+        # a hand-typed cell: only a plausible whole year counts, "81" or "1981.5" is not one
+        if year is not None and not (year.is_integer() and 1900 <= year <= 2100):
+            year = None
         return cls(
             user_id=int(rec["user_id"]),
             chat_id=int(rec["chat_id"]),
@@ -155,6 +166,8 @@ class User:
             height_cm=num_or_none(rec.get("height_cm")),
             target_kg=num_or_none(rec.get("target_kg")),
             daily_kcal_target=num_or_none(rec.get("daily_kcal_target")),
+            birth_year=None if year is None else int(year),
+            sex=parse_sex(rec.get("sex")),
         )
 
 
@@ -416,7 +429,31 @@ class SheetsRepo:
             if rec.get("user_id"):
                 user = User.from_record(rec)
                 by_key[(user.user_id, user.chat_id)] = user
-        users = list(by_key.values())
+        # A person has a row per chat (the group and the DM), but the profile describes the
+        # person, not one membership: a blank profile cell - a DM row registered after the
+        # profile was set, a cell typed into the group row only - is filled from the person's
+        # other rows (the row's own value wins, then the first one in sheet order). Otherwise
+        # that chat answers "no profile", and `/profile 45` sent there merges the blanks and
+        # `set_profile` writes them over the other row. Per-chat columns (`daily_kcal_target`,
+        # `tz`, ...) stay apart.
+        profile_fields = ("birth_year", "sex", "height_cm")
+        known: dict[tuple[int, str], Any] = {}
+        for user in by_key.values():
+            for field in profile_fields:
+                if getattr(user, field) is not None:
+                    known.setdefault((user.user_id, field), getattr(user, field))
+        # copies, filled only once `known` is complete: a filled-in value never counts as own
+        users = [
+            replace(
+                user,
+                **{
+                    field: known.get((user.user_id, field))
+                    for field in profile_fields
+                    if getattr(user, field) is None
+                },
+            )
+            for user in by_key.values()
+        ]
         self._users_cache = (now, users)
         return users
 
@@ -437,7 +474,7 @@ class SheetsRepo:
                 and existing[0] == str(user.user_id)
                 and existing[1] == str(user.chat_id)
             ):
-                # keep manually edited columns (tz, height, targets) unless the caller set them
+                # keep manually edited columns (tz, targets, profile) unless the caller set them
                 merged = User.from_record(dict(zip(HEADERS["users"], existing, strict=False)))
                 merged.chat_id = user.chat_id
                 merged.name = user.name
@@ -468,6 +505,47 @@ class SheetsRepo:
     async def set_daily_kcal_target(self, user_id: int, chat_id: int, target: float | None) -> bool:
         """Write (or clear, with None) the user's daily kcal target; False if they are unknown."""
         return await self._run(self._set_daily_kcal_target_sync, user_id, chat_id, target)
+
+    def _set_profile_sync(
+        self, user_id: int, birth_year: int | None, sex: str | None, height_cm: float | None
+    ) -> int:
+        ws = self._ws("users")
+        rows = with_retry(ws.get_all_values)
+        values = {
+            "birth_year": _blank(birth_year),
+            "sex": sex or "",
+            "height_cm": _blank(height_cm),
+        }
+        matched = [
+            idx
+            for idx, existing in enumerate(rows[1:], start=2)
+            if existing and existing[0] == str(user_id)
+        ]
+        if not matched:
+            return 0
+        data = [
+            {
+                "range": gspread.utils.rowcol_to_a1(idx, HEADERS["users"].index(col) + 1),
+                "values": [[value]],
+            }
+            for idx in matched
+            for col, value in values.items()
+        ]
+        with_retry(ws.batch_update, data)
+        self._users_cache = None
+        return len(matched)
+
+    async def set_profile(
+        self, user_id: int, birth_year: int | None, sex: str | None, height_cm: float | None
+    ) -> int:
+        """Write the person's birth year, sex and height (None clears a cell); rows updated.
+
+        Every `users` row of `user_id` gets them - one per chat the person is in - because unlike
+        the per-chat `daily_kcal_target` these describe the person, and a DM and a group must not
+        disagree about somebody's age. Only these three cells are written, so the other
+        hand-edited columns stay as they are; the caller passes the full state it wants.
+        """
+        return await self._run(self._set_profile_sync, user_id, birth_year, sex, height_cm)
 
     # -- water reminders --------------------------------------------------------------------
 

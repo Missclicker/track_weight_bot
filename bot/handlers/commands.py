@@ -1,4 +1,4 @@
-"""Slash commands: /start /help /w /food /sport /today /kcal /target /week.
+"""Slash commands: /start /help /w /food /sport /today /kcal /target /profile /week.
 
 `/food` and `/sport` without an argument ask for the text and record whatever comes back as a
 reply, so the commands can be tapped from Telegram's command menu.
@@ -22,11 +22,16 @@ from bot.handlers.photos import record_food
 from bot.handlers.sport import record_sport
 from bot.handlers.weight import record_weight
 from bot.parsing import (
+    HEIGHT_CM_MAX,
+    HEIGHT_CM_MIN,
     KCAL_TARGET_MAX,
     KCAL_TARGET_MIN,
+    PROFILE_AGE_MAX,
+    PROFILE_AGE_MIN,
     is_delete_request,
     is_target_clear_request,
     parse_kcal_target,
+    parse_profile,
     parse_weight,
     strip_yesterday,
 )
@@ -214,6 +219,48 @@ async def cmd_target(
     await message.reply(i18n.TARGET_SET.format(kcal=f"{target:.0f}"))
 
 
+async def cmd_profile(
+    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings
+) -> None:
+    user = await ensure_user(message, repo, settings)
+    # Read back rather than trust `ensure_user`: on first contact it returns the blank row it just
+    # built, while the stored one already carries the profile set in the person's other chats (see
+    # `_all_users_sync`) - merging those blanks would wipe it on every row.
+    user = await repo.get_user(user.user_id, user.chat_id) or user
+    current_year = user_now(user, settings).year
+    if not command.args:
+        profile = i18n.fmt_profile(user.birth_year, user.sex, user.height_cm, current_year)
+        await message.reply(
+            i18n.PROFILE_CURRENT.format(profile=profile) if profile else i18n.PROFILE_NONE
+        )
+        return
+    if is_target_clear_request(command.args):
+        await repo.set_profile(user.user_id, None, None, None)
+        await message.reply(i18n.PROFILE_CLEARED)
+        return
+    update = parse_profile(command.args, current_year)
+    if update is None:
+        await message.reply(
+            i18n.PROFILE_USAGE.format(
+                year_lo=current_year - PROFILE_AGE_MAX,
+                year_hi=current_year - PROFILE_AGE_MIN,
+                age_lo=PROFILE_AGE_MIN,
+                age_hi=PROFILE_AGE_MAX,
+                height_lo=HEIGHT_CM_MIN,
+                height_hi=HEIGHT_CM_MAX,
+            )
+        )
+        return
+    # "/профіль 45" changes the age alone: whatever the message did not name is kept from the
+    # sender's row, and the merged whole is written, because `set_profile` takes the full state
+    birth_year = update.birth_year if update.birth_year is not None else user.birth_year
+    sex = update.sex if update.sex is not None else user.sex
+    height_cm = update.height_cm if update.height_cm is not None else user.height_cm
+    await repo.set_profile(user.user_id, birth_year, sex, height_cm)
+    profile = i18n.fmt_profile(birth_year, sex, height_cm, current_year)
+    await message.reply(i18n.PROFILE_SET.format(profile=profile))
+
+
 async def cmd_week(message: Message, jobs: Jobs) -> None:
     await jobs.run_weekly_report(message.chat.id)
 
@@ -232,6 +279,7 @@ def build() -> Router:
     router.message.register(cmd_today, Command(*aliases["today"]))
     router.message.register(cmd_kcal, Command(*aliases["kcal"]))
     router.message.register(cmd_target, Command(*aliases["target"]))
+    router.message.register(cmd_profile, Command(*aliases["profile"]))
     router.message.register(cmd_week, Command(*aliases["week"]))
     # after the commands, but still in the first router inside `guarded`: an answer to the food
     # prompt must be read as food even when it is a bare number (which `weight` would grab) or a

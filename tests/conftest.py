@@ -40,6 +40,14 @@ class FakeRepo:
         user.daily_kcal_target = target
         return True
 
+    async def set_profile(
+        self, user_id: int, birth_year: int | None, sex: str | None, height_cm: float | None
+    ) -> int:
+        mine = [u for u in self.users if u.user_id == user_id]  # every chat, like the real repo
+        for user in mine:
+            user.birth_year, user.sex, user.height_cm = birth_year, sex, height_cm
+        return len(mine)
+
     async def get_active_users(self, chat_id: int) -> list[User]:
         return [u for u in self.users if u.chat_id == chat_id and u.active]
 
