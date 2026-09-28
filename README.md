@@ -6,7 +6,7 @@ A small Telegram bot for a friend group that wants to lose weight together. It l
 2. **Records weight** when someone posts a number like `84.3` (or replies to the morning ping).
 3. **Pings everyone who hasn't weighed in by 11:00.**
 4. **Logs sport** from `/sport пробіг 5 км за 30 хв` as negative calories.
-5. **Posts a weekly AI report** every Monday morning about the week that just ended — intake, sport, weight trend, and recommendations (kcal target, veg/protein ratio). In a one-to-one chat the text is written for you alone; that personal report is skipped if you already get one in a group.
+5. **Posts a weekly nutritionist-style report** every Monday morning about the week that just ended (and on `/week` about the last 7 full days) — energy against your kcal target and a maintenance estimate, protein against an age-based norm (1.2 g/kg under 40, 1.5 g/kg from 40), macro balance, vegetables, alcohol, late meals, weight and BMI, how the week compares with the one before, and a follow-up on last week's advice, closing with a few concrete goals for the new week. Birth year, sex and height (`/профіль`) are optional: without them the report is simpler and skips the protein norm and the energy estimate. A long report arrives as several messages. In a one-to-one chat the text is written for you alone; that personal report is skipped if you already get one in a group.
 6. **Reminds you to drink water** in a private message, on a schedule you pick yourself (`/вода будні з 9 до 18 кожні 30 хвилин`).
 
 Everything runs on free tiers: a Python bot with long polling (no public endpoint needed), Google Sheets as the database, Gemini Flash for AI. Estimated cost: **$0/month**. Bot replies are in Ukrainian by default (see `bot/i18n.py`).

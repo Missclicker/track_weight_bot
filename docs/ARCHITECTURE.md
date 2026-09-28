@@ -21,10 +21,10 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
 | `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
-| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report`. Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
+| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report` (the only call with a role: `REPORT_SYSTEM_INSTRUCTION` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
-| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini). |
+| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini); two pure helpers for the report text: `previous_advice` (last week's stored report minus its header, or None when it carries no advice) and `split_message` (Telegram-sized pieces of at most 4000 characters). |
 | `bot/scheduler.py` | `Jobs` (ping per timezone, water tick, weekly report) and `build_scheduler`. |
 | `bot/handlers/` | aiogram routers, one file per feature; `__init__.py` assembles them and holds the allowed-chat gate and the global error handler. |
 
@@ -133,6 +133,35 @@ skews the numbers. A chat with a positive id is a DM: it gets `PERSONAL_REPORT_P
 the group one, and the scheduled run skips it entirely when that user is also an active member of
 one of the allowed group chats (they already get their numbers there). `/week` ignores that skip -
 an explicit ask is always answered.
+
+**Weekly report.** The report is written by a nutritionist persona - evidence-based, with
+sports-nutrition and 40+ expertise, warm and never shaming, no diagnoses or doses, a doctor only
+for the red flags it names, only the numbers in the data, plain Ukrainian text. That role is
+`REPORT_SYSTEM_INSTRUCTION`, sent as the config's `system_instruction` rather than as a paragraph
+of the prompt: the persona and its rules hold for the whole answer whatever the week looked like,
+so they stay apart from the per-week task and the data, and the free text inside the prompt
+(names, last week's report) has a harder time overriding them. The other three Gemini calls send
+no system instruction. The two prompts carry the rest: the labelled lines per person, the length
+(~1100 characters a person in a group, ~2500 in a DM), the simpler report for somebody without a
+profile, how the bot computes the protein target (so the model explains it but never recomputes
+it) and notes on what the payload fields mean.
+For continuity the job hands the model last week's report:
+`SheetsRepo.get_previous_report(chat_id, week_start)` picks the stored report of that chat whose
+`week_start` falls in `[week_start - 13, week_start - 7]`, the latest `ts` winning. That is a window which ended before
+this one began, at most a week earlier: a mid-week `/week` overlaps the current window, so its
+numbers are partly this week's and it is not "last week", and anything older is too stale to
+follow up on. `reports.previous_advice` then drops the header line and turns a numbers-only
+fallback or a no-data text into None - neither holds advice, and handing one over would invite a
+follow-up on advice nobody gave. The text goes after the data in a `<<< >>>` block the model is
+told to treat as data and to check against the numbers rather than repeat; without one the prompt
+does not mention a previous report at all. The lookup is optional context, so its failure is
+caught, logged as a WARNING, and the report is written without it.
+A group report can outgrow a Telegram message (4096 UTF-16 units), so every text - AI,
+numbers-only or no-data - goes through `reports.split_message`: pieces of at most 4000 characters,
+cut at paragraph breaks first (a person's block stays whole), then at line breaks, then hard, all
+sent in order with `parse_mode=None`; only the first carries the header. It is still one report:
+the full text is stored once, in a single `reports` row, which is exactly what next week's lookup
+reads back.
 
 **Water reminders.** One `water_tick` job runs every minute and walks an in-memory list of the
 active rows of the `water` tab, so a per-user interval costs neither a job per subscriber nor a

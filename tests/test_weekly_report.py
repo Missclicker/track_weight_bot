@@ -6,6 +6,7 @@ send path is testable without a clock or a network.
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from bot import i18n
 from bot.ai import FoodEstimate
 from bot.config import Settings
 from bot.scheduler import Jobs, build_scheduler, is_personal_chat
@@ -32,27 +34,37 @@ MONDAY = date(2026, 9, 14)
 class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.parse_modes: list[Any] = []
 
     async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> None:
         self.sent.append((chat_id, text))
+        self.parse_modes.append(kwargs.get("parse_mode", "unset"))
 
 
 class FakeAI:
-    """Records the payload and the `personal` flag of every `weekly_report` call."""
+    """Records the payload, the `personal` flag and the previous report of every call."""
 
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, answer: str = "порада від AI") -> None:
         self.calls: list[tuple[dict[str, Any], bool]] = []
         self.notices: list[Any] = []
+        self.previous: list[str | None] = []
         self.fail = fail
+        self.answer = answer
 
     async def weekly_report(
-        self, payload: dict[str, Any], personal: bool = False, on_retry: Any = None
+        self,
+        payload: dict[str, Any],
+        personal: bool = False,
+        on_retry: Any = None,
+        *,
+        previous_report: str | None = None,
     ) -> str:
         self.calls.append((payload, personal))
         self.notices.append(on_retry)
+        self.previous.append(previous_report)
         if self.fail:
             raise RuntimeError("gemini is having a bad day")
-        return "порада від AI"
+        return self.answer
 
 
 def _settings(chat_ids: str) -> Settings:
@@ -241,6 +253,116 @@ async def test_numbers_are_sent_when_gemini_fails(repo: FakeRepo, user: User) ->
 
     assert "1800 ккал за тиждень" in text
     assert bot.sent == [(GROUP, text)]
+
+
+# -- last week's report and long reports ------------------------------------------------------
+
+# the MONDAY run covers 2026-09-07..13; last week's Monday run covered 2026-08-31..09-06
+WEEK_START = date(2026, 9, 7)
+
+
+def _header(start: date) -> str:
+    end = start + timedelta(days=6)
+    return i18n.WEEKLY_HEADER.format(start=start.isoformat(), end=end.isoformat())
+
+
+async def _logged_week(repo: FakeRepo, user: User) -> None:
+    await repo.upsert_user(user)
+    await repo.add_food(user, _food(1800), _dt(date(2026, 9, 9)), "text", 1)
+
+
+async def test_last_weeks_report_is_passed_without_its_header(repo: FakeRepo, user: User) -> None:
+    await _logged_week(repo, user)
+    last = WEEK_START - timedelta(days=7)
+    text = f"{_header(last)}\n\nОлексій\n- 120 г білка щодня"
+    await repo.add_report(last, GROUP, text, _dt(WEEK_START, 9))
+
+    ai = FakeAI()
+    jobs, _ = _jobs(repo, _settings(str(GROUP)), ai)
+    await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert ai.previous == ["Олексій\n- 120 г білка щодня"]
+
+
+@pytest.mark.parametrize(
+    ("days_before", "chat_id", "body"),
+    [
+        # a mid-week /week: its window overlaps the one being reported on
+        pytest.param(3, GROUP, "\n\nпорада", id="overlapping"),
+        pytest.param(14, GROUP, "\n\nпорада", id="too-old"),
+        pytest.param(7, -200, "\n\nпорада", id="another-chat"),
+        pytest.param(7, GROUP, f"\n{i18n.WEEKLY_AI_FAILED}\n\nОлексій: 1800", id="numbers-only"),
+        pytest.param(7, GROUP, f"\n{i18n.WEEKLY_NO_DATA}", id="no-data"),
+    ],
+)
+async def test_only_last_weeks_advice_counts_as_the_previous_report(
+    repo: FakeRepo, user: User, days_before: int, chat_id: int, body: str
+) -> None:
+    await _logged_week(repo, user)
+    start = WEEK_START - timedelta(days=days_before)
+    await repo.add_report(start, chat_id, _header(start) + body, _dt(start + timedelta(days=7), 9))
+
+    ai = FakeAI()
+    jobs, _ = _jobs(repo, _settings(str(GROUP)), ai)
+    await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert ai.previous == [None]
+
+
+async def test_the_latest_previous_report_wins(repo: FakeRepo, user: User) -> None:
+    """Last Monday's run beats a `/week` from the Sunday before it, whatever the row order."""
+    await _logged_week(repo, user)
+    monday = WEEK_START - timedelta(days=7)  # sent 2026-09-07, covers 08-31..09-06
+    sunday = WEEK_START - timedelta(days=8)  # sent 2026-09-06, covers 08-30..09-05
+    await repo.add_report(monday, GROUP, f"{_header(monday)}\n\nпонеділок", _dt(WEEK_START, 9))
+    # appended *after* the Monday row, so a "last row wins" pick would choose it
+    await repo.add_report(sunday, GROUP, f"{_header(sunday)}\n\nнеділя", _dt(date(2026, 9, 6), 20))
+
+    ai = FakeAI()
+    jobs, _ = _jobs(repo, _settings(str(GROUP)), ai)
+    await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert ai.previous == ["понеділок"]
+
+
+async def test_a_failing_previous_report_lookup_still_sends_the_report(
+    repo: FakeRepo, user: User, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Last week's text is optional context: losing it must not cost the week its report."""
+    await _logged_week(repo, user)
+
+    async def broken(chat_id: int, week_start: date) -> str | None:
+        raise RuntimeError("sheets is down")
+
+    repo.get_previous_report = broken  # type: ignore[method-assign]
+    caplog.set_level(logging.WARNING, logger="bot.scheduler")
+    ai = FakeAI()
+    jobs, bot = _jobs(repo, _settings(str(GROUP)), ai)
+    text = await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert ai.previous == [None]
+    assert text == f"{_header(WEEK_START)}\n\nпорада від AI"
+    assert bot.sent == [(GROUP, text)]
+    assert [row["text"] for row in repo.rows["reports"]] == [text]
+    assert [r.levelname for r in caplog.records if r.exc_info] == ["WARNING"]
+
+
+async def test_a_long_report_is_sent_in_pieces_and_stored_once(repo: FakeRepo, user: User) -> None:
+    await _logged_week(repo, user)
+    paragraphs = ["А" * 2500, "Б" * 2500, "В" * 2500]
+    ai = FakeAI(answer="\n\n".join(paragraphs))
+    jobs, bot = _jobs(repo, _settings(str(GROUP)), ai)
+    text = await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    header = _header(WEEK_START)
+    sent = [chunk for _, chunk in bot.sent]
+    assert [chat_id for chat_id, _ in bot.sent] == [GROUP] * 3
+    assert all(len(chunk) <= 4000 for chunk in sent)
+    assert sent == [f"{header}\n\n{paragraphs[0]}", paragraphs[1], paragraphs[2]]
+    assert bot.parse_modes == [None] * 3  # every piece, not just the first
+    # one report: stored whole, once, and nothing lost between the pieces
+    assert [row["text"] for row in repo.rows["reports"]] == [text]
+    assert "\n\n".join(sent) == text
 
 
 def test_the_weekly_job_runs_monday_morning(repo: FakeRepo) -> None:

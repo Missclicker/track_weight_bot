@@ -1,7 +1,9 @@
 """Aggregations over the sheet for `/today`, `/kcal`, the food-reply totals and the weekly report.
 
 Both functions only need the repository interface (`user_rows_between`, `get_active_users`), so
-they are tested against the in-memory `FakeRepo` in `tests/conftest.py`.
+they are tested against the in-memory `FakeRepo` in `tests/conftest.py`. The two pure helpers at
+the end prepare the weekly report's text: last week's advice for the prompt and the split into
+Telegram-sized messages.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, NamedTuple, Protocol
 
+from bot import i18n
 from bot.parsing import ts_time
 from bot.sheets import User, num, num_or_none
 
@@ -130,3 +133,74 @@ async def build_weekly_payload(repo: Repo, chat_id: int, week_start: date) -> di
         "week_end": week_end.isoformat(),
         "users": users_payload,
     }
+
+
+# Telegram refuses a message over 4096 characters, counted in UTF-16 code units. The bot sends no
+# emojis, so its text is almost entirely in the BMP where both counts agree; the margin covers the
+# odd astral character and keeps a message clear of the edge.
+MESSAGE_LIMIT = 4000
+# Bounds what last week's report can add to the prompt: the stored cell is editable by hand, and a
+# follow-up needs the advice, not a novel.
+_MAX_ADVICE_CHARS = 3000
+
+
+def previous_advice(text: str | None) -> str | None:
+    """Last week's stored report reduced to what the model should follow up on, or None.
+
+    A numbers-only fallback (`i18n.WEEKLY_AI_FAILED`) and a no-data report (`i18n.WEEKLY_NO_DATA`)
+    carry no advice, so they count as no previous report at all: handing one over would only
+    invite the model to follow up on advice nobody gave. The header line is our own date range,
+    not the model's words, and is dropped.
+    """
+    if text is None or not text.strip():
+        return None
+    if i18n.WEEKLY_AI_FAILED in text or i18n.WEEKLY_NO_DATA in text:
+        return None
+    header = i18n.WEEKLY_HEADER.split("{", 1)[0].strip()
+    first, _, rest = text.strip().partition("\n")
+    advice = (rest if first.startswith(header) else text).strip()
+    return advice[:_MAX_ADVICE_CHARS] or None
+
+
+def _split_point(text: str, limit: int) -> int:
+    """Where to cut `text` so the piece before the cut fits in `limit` characters.
+
+    A paragraph break wins, then a line break - but only in the second half of the window: the
+    *last* break that fits is the natural choice, yet a lone early one (the header line above one
+    long paragraph) would otherwise send a message holding nothing but the header. Without a break
+    in that half the latest line break anywhere is taken, and a single line longer than the whole
+    window is cut hard. The index points *at* the separator, which the caller then drops.
+    """
+    for sep in ("\n\n", "\n"):
+        # `+ len(sep)`: the separator itself may end past the limit, it is not sent
+        cut = text.rfind(sep, limit // 2, limit + len(sep))
+        if cut > 0:
+            return cut
+    cut = text.rfind("\n", 0, limit + 1)
+    return cut if cut > 0 else limit
+
+
+def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """`text` as Telegram-sized messages, in order, each at most `limit` characters.
+
+    Cuts at paragraph boundaries where possible, then at line breaks, then hard (see
+    `_split_point`). A text that fits is returned as it is. Otherwise the only thing dropped is
+    whitespace at the cuts and at the two ends - the separator plus any blank space around it,
+    which would only open or close a message with empty lines - so no content is lost or sent
+    twice, and no piece is empty or whitespace-only (Telegram rejects an empty message).
+    """
+    if limit < 1:
+        raise ValueError(f"limit must be positive, got {limit}")
+    if len(text) <= limit:
+        return [text] if text.strip() else []
+    chunks: list[str] = []
+    rest = text.strip()
+    while len(rest) > limit:
+        cut = _split_point(rest, limit)
+        # `rest` never starts with whitespace, so the piece is never blank; and every cut is > 0,
+        # so the loop always makes progress
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if rest:
+        chunks.append(rest)
+    return chunks
