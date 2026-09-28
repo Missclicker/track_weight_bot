@@ -6,7 +6,7 @@ the reply and appends the row.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from functools import partial
 from io import BytesIO
 
@@ -33,15 +33,20 @@ async def record_food(
     photo_file_id: str = "",
     *,
     yesterday: bool = False,
+    at: time | None = None,
 ) -> None:
     """Reply with the estimate plus the day's total (this entry included) and store the row.
 
     With `yesterday` the meal counts towards the previous day in the user's timezone: the running
     total is read for that day and the reply names it, so nobody has to guess which day the
-    number covers. The row's `ts` still says now - that is when it was typed.
+    number covers. The row's `ts` says now - when it was typed - unless `at` states the time of
+    the meal ("/їжа 14:00 борщ"): then `ts` is that clock on the meal's own day, with the offset
+    the user's zone has on that date, so `/kcal` and the late-meal count read the stated time.
+    A time later than now is taken as stated.
     """
     now = user_now(user, settings)
     day = now.date() - timedelta(days=1) if yesterday else now.date()
+    when = now if at is None else datetime.combine(day, at, tzinfo=now.tzinfo)
     before = await day_food(repo, user.user_id, day)
     total_line = i18n.day_total(
         before.total_kcal + est.kcal,
@@ -63,7 +68,7 @@ async def record_food(
         )
     )
     await repo.add_food(
-        user, est, now, source, reply.message_id, photo_file_id, day=day if yesterday else None
+        user, est, when, source, reply.message_id, photo_file_id, day=day if yesterday else None
     )
 
 

@@ -639,7 +639,8 @@ class SheetsRepo:
         #
         # `day` overrides the date this meal counts towards ("вчора млинці"), so the two columns
         # can disagree on purpose: `date` is the lookup key every aggregation groups by, while
-        # `ts` stays the moment the entry was actually typed.
+        # `when` is whatever the caller says `ts` is - the moment the entry was typed, or the
+        # meal's own time when one was stated ("/їжа 14:00 борщ"), which then lies on `day`.
         row = [
             when.isoformat(timespec="seconds"),
             (day or when.date()).isoformat(),

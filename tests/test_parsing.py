@@ -18,6 +18,7 @@ from bot.parsing import (
     parse_sex,
     parse_water_schedule,
     parse_weight,
+    strip_meal_time,
     strip_yesterday,
     ts_time,
 )
@@ -560,3 +561,42 @@ def test_ts_time(value: object, expected: str | None) -> None:
 )
 def test_strip_yesterday(text: str | None, expected: tuple[str, bool]) -> None:
     assert strip_yesterday(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("14:00 борщ і два бутерброди з салом", ("борщ і два бутерброди з салом", time(14, 0))),
+        ("яєчня з 3 яєць 14-00", ("яєчня з 3 яєць", time(14, 0))),
+        # the position is judged before "вчора" goes, which is `strip_yesterday`'s job afterwards
+        ("14-00 вчора кава з молоком", ("вчора кава з молоком", time(14, 0))),
+        ("вчора кавун 300г 14:00", ("вчора кавун 300г", time(14, 0))),
+        ("вчора 14:00 кава", ("вчора 14:00 кава", None)),
+        ("7:30 вівсянка", ("вівсянка", time(7, 30))),
+        ("7-05 вівсянка", ("вівсянка", time(7, 5))),
+        ("вівсянка 0:00", ("вівсянка", time(0, 0))),
+        ("вівсянка 23:59", ("вівсянка", time(23, 59))),
+        ("14:00, борщ", ("борщ", time(14, 0))),
+        ("борщ 14:00.", ("борщ", time(14, 0))),
+        ("  14:00   борщ  і  хліб ", ("борщ і хліб", time(14, 0))),
+        ("14:00 борщ 19:30", ("борщ 19:30", time(14, 0))),  # one time only: the first wins
+        ("кава 14:00 і тістечко", ("кава 14:00 і тістечко", None)),  # the middle is not a time
+        ("кава 14:00 вчора", ("кава 14:00 вчора", None)),
+        ("кава 14.00", ("кава 14.00", None)),
+        ("кава 14 00", ("кава 14 00", None)),
+        ("кава 14год", ("кава 14год", None)),
+        ("о 14:00 кава", ("о 14:00 кава", None)),
+        ("25:00 кава", ("25:00 кава", None)),
+        ("кава 14:75", ("кава 14:75", None)),
+        ("7:5 кава", ("7:5 кава", None)),
+        ("114:00 кава", ("114:00 кава", None)),
+        ("яєчня з 3 яєць", ("яєчня з 3 яєць", None)),
+        ("14:00", ("", time(14, 0))),
+        ("14:00 вчора", ("вчора", time(14, 0))),
+        ("", ("", None)),
+        ("   ", ("", None)),
+        (None, ("", None)),
+    ],
+)
+def test_strip_meal_time(text: str | None, expected: tuple[str, time | None]) -> None:
+    assert strip_meal_time(text) == expected

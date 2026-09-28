@@ -386,6 +386,34 @@ def strip_yesterday(text: str | None) -> tuple[str, bool]:
     return " ".join(stripped.split()), count > 0
 
 
+# The clock a `/їжа` description may carry: "14:00 борщ", "яєчня 14-00". Only the first or the last
+# whitespace-separated token counts, and only as H:MM / HH:MM with ":" or "-": a time in the middle
+# is usually part of the description ("кава о 14:00 і тістечко"), and the narrow rule keeps the
+# ordinary numbers of a dish ("яєчня з 3 яєць", "2-3 ложки") well away from it. A comma, period or
+# semicolon glued to the token ("14:00, борщ") is what people type and goes with it.
+_MEAL_TIME = re.compile(r"(?P<h>[01]?\d|2[0-3])[:-](?P<m>[0-5]\d)[,.;]?")
+
+
+def strip_meal_time(text: str | None) -> tuple[str, time | None]:
+    """Split "14:00 борщ" into the text Gemini should see and the stated time of the meal.
+
+    The position is judged on the raw text, before "вчора" is stripped, so "14-00 вчора кава" and
+    "вчора кавун 14:00" both carry a time while "вчора 14:00 кава" does not. Only one time is taken:
+    when both ends are clocks the first one wins and the last stays in the text. An invalid clock
+    ("25:00", "14:75", "7:5") is simply not a time and stays where it was, like any other word.
+    Whitespace is normalised either way, as `strip_yesterday` does.
+    """
+    tokens = (text or "").split()
+    if not tokens:
+        return "", None
+    for index in (0, len(tokens) - 1):
+        found = _MEAL_TIME.fullmatch(tokens[index])
+        if found:
+            rest = tokens[:index] + tokens[index + 1 :]
+            return " ".join(rest), time(int(found["h"]), int(found["m"]))
+    return " ".join(tokens), None
+
+
 # -- stored timestamps --------------------------------------------------------------------------
 
 

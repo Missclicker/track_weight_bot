@@ -19,7 +19,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/__main__.py` | Entry point. Loads settings (fails fast with a readable message), ensures the sheet schema, builds `Bot`/`Dispatcher`, injects dependencies, starts the scheduler and polling. |
 | `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist. |
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
-| `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `parse_profile` (birth year or age, sex and height in any order, all-or-nothing, + the `ProfileUpdate` value object) / `parse_sex` (a typed word or a `users.sex` cell -> `"m"`/`"f"`), `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
+| `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `parse_profile` (birth year or age, sex and height in any order, all-or-nothing, + the `ProfileUpdate` value object) / `parse_sex` (a typed word or a `users.sex` cell -> `"m"`/`"f"`), `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `strip_meal_time` (takes a leading or trailing `H:MM` / `H-MM` off a `/їжа` text as the meal time), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
 | `bot/nutrition.py` | Pure numbers for the weekly report, None in -> None out: `age_on`, the age-based `protein_g_per_kg` and the `reference_weight` it multiplies, `bmi`, `bmr_mifflin` (Mifflin-St Jeor), `maintenance_kcal` (sedentary BMR + logged sport) and `energy_shares` (see *Nutrition numbers* below). |
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report` (the only call with a role: `REPORT_SYSTEM_INSTRUCTION` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
@@ -49,8 +49,8 @@ Inside `guarded` the routers are tried in order:
    read in full is answered with the usage text and stores nothing. `/food` and food photos
    share `photos.record_food`, which reads the sender's food rows for today so the `≈` reply
    ends with "Разом за сьогодні: N ккал" (the new entry included); `/kcal` lists those rows, each
-   line starting with the time it was logged at ("07:54 - 390 ккал - ..."), read straight off the
-   row's `ts` - it is already in the user's timezone, so no conversion happens. A hand-edited row
+   line starting with the time it was logged at, or the meal time stated with it ("07:54 - 390
+   ккал - ..."), read straight off the row's `ts` - it is already in the user's timezone, so no conversion happens. A hand-edited row
    whose `ts` carries no usable time shows `i18n.KCAL_NO_TIME` ("--:--") instead, never midnight.
    A bare `/food` or `/sport` (tapped from Telegram's command menu) answers with a `ForceReply`
    prompt and the reply to it is recorded - the `InputPrompt` filter recognises the prompt by its
@@ -128,11 +128,27 @@ aggregations.
 
 "вчора" ("учора", "yesterday") in `/їжа`, `/спорт`, a reply to either prompt or a photo caption
 files the entry under the previous day in the user's timezone: `date` is that day, while `ts`
-stays the moment the message was sent, so the two columns disagree on purpose. `strip_yesterday`
-removes the marker before the text reaches Gemini - the dish name and the activity title come
-back from the model, and "вчора млинці" would otherwise be stored as the dish. The confirmation
-names the day it was filed under ("Разом за 2026-09-18: ...", "Записано за 2026-09-18."), and
-`/їжа вчора` with nothing else is still the bare command: the bot asks for the description.
+stays the moment the message was sent (unless the meal's time is stated, see below), so the two
+columns disagree on purpose. `strip_yesterday` removes the marker before the text reaches
+Gemini - the dish name and the activity title come back from the model, and "вчора млинці" would
+otherwise be stored as the dish. The confirmation names the day it was filed under ("Разом за
+2026-09-18: ...", "Записано за 2026-09-18."), and `/їжа вчора` with nothing else is still the bare
+command: the bot asks for the description - as does a prompt reply that is only "вчора" or a time.
+
+A `/їжа` text (the command's arguments or a reply to its prompt - not a photo caption, not
+`/спорт`) may also state when the meal was eaten: a clock `H:MM` / `HH:MM` with `:` or `-` as the
+*first or last* whitespace-separated token ("14:00 борщ", "яєчня з 3 яєць 14-00"), a trailing comma,
+period or semicolon allowed. Then `ts` is that clock on the day the meal counts towards (today, or
+yesterday with "вчора") with the offset the user's zone has on that date, and `date` is unchanged -
+so a timed row's two columns agree again, `/kcal` shows the stated time and `user_rows_between`,
+which sorts by `ts`, puts a backfilled meal in its place. `strip_meal_time` removes the token
+before Gemini sees the text and runs *before* `strip_yesterday`, so the position is judged on the
+text as typed: "14-00 вчора кава" and "вчора кавун 14:00" carry a time, "вчора 14:00 кава" does not.
+The rule is narrow on purpose - a time in the middle is usually part of the description, and
+anything else (`14.00`, `14 00`, `14год`, `о 14:00`, an invalid `25:00`) stays in the text
+untouched. Only one time is taken: with clocks at both ends the first one wins and the last goes to
+Gemini. A time later than now is accepted as stated. `/їжа 14:00` alone is the bare command, and
+the time is not carried over to the reply - the reply may state it again.
 
 **Scheduler.** At startup and nightly at 00:05 the bot collects the distinct timezones of active
 users and (re)creates one cron job per timezone at `WEIGH_IN_DEADLINE`. The job mentions
@@ -211,8 +227,9 @@ the logged sport is added on top and an activity level would count it twice. It 
 ±15-20 % (a population formula plus MET-table sport), and the prompt says so. `late_meals` counts
 entries whose `ts` is at or after 21:00 *and* on the entry's own `date`: a row backdated with
 "вчора" keeps the moment it was sent in `ts`, so its clock time says nothing about when the meal was
-eaten. `previous_week` holds the 7 days before (`previous_week_start..previous_week_end`, both at
-the top level): days logged, the kcal and protein averages, g/kg, alcohol, vegetables, sport, the
+eaten - unless the meal's time was stated ("/їжа вчора шаурма 22:00"), which puts `ts` on that
+`date` and makes its clock count. `previous_week` holds the 7 days before
+(`previous_week_start..previous_week_end`, both at the top level): days logged, the kcal and protein averages, g/kg, alcohol, vegetables, sport, the
 last weight and its delta, computed by the same `_window_numbers` as the current week so the two
 definitions cannot drift apart - except that its g/kg divides by *this* week's reference weight, so
 the two compare; it is null when that window has no rows. The extra window costs no extra read:

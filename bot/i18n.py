@@ -399,8 +399,9 @@ def kcal_today(
 ) -> str:
     """`/kcal`: today's food entries one per line and the total. Never starts with FOOD_PREFIX.
 
-    Each item is `(at, dish, kcal)` - `reports.FoodItem` - where `at` is the "HH:MM" the entry was
-    logged at in the user's own timezone; a row without a usable timestamp shows `KCAL_NO_TIME`.
+    Each item is `(at, dish, kcal)` - `reports.FoodItem` - where `at` is the "HH:MM" of the
+    entry's `ts` in the user's own timezone: when it was logged, or the meal time stated with it
+    ("/їжа 14:00 борщ"). A row without a usable timestamp shows `KCAL_NO_TIME`.
     """
     lines = [KCAL_HEADER.format(name=escape(name), date=date_str)]
     if not items:

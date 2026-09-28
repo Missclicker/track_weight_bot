@@ -7,7 +7,7 @@ ignored) and that the allowed-chat gate works. Gemini and Sheets are replaced by
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
 
 import pytest
@@ -1164,6 +1164,34 @@ async def test_a_photo_caption_saying_yesterday_is_dated_yesterday(
     assert repo.rows["food"][0]["date"] == _yesterday_iso(settings)
 
 
+async def test_a_photo_caption_time_goes_to_gemini_as_typed(
+    harness, repo: FakeRepo, monkeypatch
+) -> None:
+    """Only `/їжа` text reads a leading or trailing time; a caption is left as it is."""
+    dp, bot, _, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="борщ", kcal=400)]
+
+    async def fake_download(file: Any, destination: Any) -> None:
+        destination.write(b"jpeg")
+
+    monkeypatch.setattr(bot, "download", fake_download)
+    await dp.feed_update(bot, _photo_update(caption="14:00 борщ"))
+
+    assert ai.estimate_calls == ["14:00 борщ"]
+    assert len(repo.rows["food"]) == 1
+
+
+async def test_a_prompt_reply_of_only_a_time_asks_again(harness, repo: FakeRepo) -> None:
+    dp, bot, session, ai = harness
+    unused = FoodEstimate(dish="борщ", kcal=400)
+    ai.food_estimates = [unused]
+    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    await dp.feed_update(bot, _update("14:00 вчора", reply_to=prompt))
+
+    assert session.sent[-1]["text"] == i18n.FOOD_INPUT_PROMPT
+    assert ai.food_estimates == [unused] and repo.rows["food"] == []
+
+
 async def test_a_bare_yesterday_command_asks_for_the_text(harness, repo: FakeRepo) -> None:
     """ "/їжа вчора" still names no dish, so it behaves like the bare command."""
     dp, bot, session, ai = harness
@@ -1176,6 +1204,85 @@ async def test_a_bare_yesterday_command_asks_for_the_text(harness, repo: FakeRep
     await dp.feed_update(bot, _update("/спорт вчора", message_id=2))
     assert session.sent[-1]["text"] == i18n.SPORT_INPUT_PROMPT
     assert ai.sport_calls == [] and repo.rows["sport"] == []
+
+
+def _meal_ts(settings: Settings, days_back: int, at: time) -> str:
+    """The `ts` a meal stated at `at` gets, `days_back` days ago in the sender's timezone."""
+    now = user_now(User(user_id=ME, chat_id=CHAT_ID, name="Олексій"), settings)
+    day = now.date() - timedelta(days=days_back)
+    return datetime.combine(day, at, tzinfo=now.tzinfo).isoformat(timespec="seconds")
+
+
+async def test_a_food_command_with_a_leading_time_stores_that_time(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, session, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="борщ", kcal=600)]
+    await dp.feed_update(bot, _update("/їжа 14:00 борщ і два бутерброди з салом"))
+
+    row = repo.rows["food"][0]
+    assert row["ts"] == _meal_ts(settings, 0, time(14, 0))
+    assert row["date"] == user_now(User(ME, CHAT_ID, "x"), settings).date().isoformat()
+    assert ai.estimate_calls == ["борщ і два бутерброди з салом"]  # the time never reached Gemini
+    assert session.sent[-1]["text"].startswith(i18n.FOOD_PREFIX)
+
+
+@pytest.mark.parametrize(
+    ("text", "gemini_text"),
+    [
+        ("/їжа 14-00 вчора кава з молоком", "кава з молоком"),
+        ("/їжа вчора кавун 300г 14:00", "кавун 300г"),
+    ],
+)
+async def test_a_timed_yesterday_meal_is_stored_at_that_time_yesterday(
+    harness, repo: FakeRepo, settings: Settings, text: str, gemini_text: str
+) -> None:
+    dp, bot, _, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="кава", kcal=100)]
+    await dp.feed_update(bot, _update(text))
+
+    row = repo.rows["food"][0]
+    assert (row["date"], row["ts"]) == (_yesterday_iso(settings), _meal_ts(settings, 1, time(14)))
+    assert ai.estimate_calls == [gemini_text]
+
+
+async def test_a_timed_reply_to_the_food_prompt_gets_the_time(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, _, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="яєчня", kcal=300)]
+    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    await dp.feed_update(bot, _update("яєчня з 3 яєць 14-00", reply_to=prompt))
+
+    row = repo.rows["food"][0]
+    assert (row["ts"], row["source"]) == (_meal_ts(settings, 0, time(14)), "prompt")
+    assert ai.estimate_calls == ["яєчня з 3 яєць"]
+
+
+async def test_a_time_that_is_not_last_keeps_the_send_moment(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    """ "кава 14:00 вчора": the clock is in the middle, so it is part of the description."""
+    dp, bot, _, ai = harness
+    ai.food_estimates = [FoodEstimate(dish="кава", kcal=50)]
+    before = user_now(User(ME, CHAT_ID, "x"), settings).replace(microsecond=0)
+    await dp.feed_update(bot, _update("/їжа кава 14:00 вчора"))
+    after = user_now(User(ME, CHAT_ID, "x"), settings)
+
+    row = repo.rows["food"][0]
+    assert row["date"] == _yesterday_iso(settings)
+    assert before <= datetime.fromisoformat(str(row["ts"])) <= after
+    assert ai.estimate_calls == ["кава 14:00"]
+
+
+@pytest.mark.parametrize("text", ["/їжа 14:00", "/їжа 14:00 вчора"])
+async def test_a_bare_timed_command_asks_for_the_text(harness, repo: FakeRepo, text: str) -> None:
+    dp, bot, session, ai = harness
+    unused = FoodEstimate(dish="борщ", kcal=500)
+    ai.food_estimates = [unused]
+    await dp.feed_update(bot, _update(text))
+    assert session.sent[-1]["text"] == i18n.FOOD_INPUT_PROMPT
+    assert ai.food_estimates == [unused] and repo.rows["food"] == []
 
 
 async def test_a_yesterday_food_row_can_still_be_deleted(harness, repo: FakeRepo) -> None:

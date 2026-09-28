@@ -353,6 +353,24 @@ async def test_weekly_payload_late_meals(repo: FakeRepo, user: User) -> None:
     assert me["late_meals"] == 2
 
 
+async def test_weekly_payload_late_meals_of_timed_backdated_rows(
+    repo: FakeRepo, user: User
+) -> None:
+    """A stated time puts `ts` on the row's own `date`, so its clock is when the meal was eaten."""
+    # "/їжа вчора шаурма 22:00" typed on 09-04: filed under 09-03 at 22:00 - a late meal
+    await repo.add_food(
+        user, _food(500), _dt(date(2026, 9, 3), 22), "text", 1, day=date(2026, 9, 3)
+    )
+    # "/їжа вчора кавун 14:00" typed on 09-04 at 23:00: stored at 14:00 - no late meal
+    await repo.add_food(
+        user, _food(500), _dt(date(2026, 9, 3), 14), "text", 2, day=date(2026, 9, 3)
+    )
+
+    me = await _payload_of(repo, user)
+
+    assert (me["food_entries"], me["late_meals"]) == (2, 1)
+
+
 @pytest.mark.parametrize(
     ("target", "expected"),
     [(2000.0, 1), (None, None), (0.0, None), (-100.0, None), (float("inf"), None)],

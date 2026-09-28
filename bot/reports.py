@@ -135,7 +135,9 @@ def _is_late_meal(row: dict[str, Any]) -> bool:
     if at is None or at < nutrition.LATE_MEAL_FROM:
         return False
     # A row backdated with "вчора" keeps the moment the message was sent in `ts`, on another day
-    # than its `date`: that clock time says when it was typed, not when the meal was eaten.
+    # than its `date`: that clock time says when it was typed, not when the meal was eaten. With a
+    # stated time ("/їжа вчора шаурма 22:00") `ts` is that clock on the row's own `date`, so it
+    # counts like any meal logged as it was eaten.
     return str(row.get("ts")).strip()[:10] == str(row.get("date", ""))
 
 

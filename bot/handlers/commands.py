@@ -33,6 +33,7 @@ from bot.parsing import (
     parse_kcal_target,
     parse_profile,
     parse_weight,
+    strip_meal_time,
     strip_yesterday,
 )
 from bot.reports import day_food, today_summary
@@ -117,24 +118,32 @@ async def _record_food_text(
     source: str,
 ) -> None:
     user = await ensure_user(message, repo, settings)
-    # "вчора" dates the meal and must not reach Gemini: it would be taken for part of the dish.
+    # A stated clock and "вчора" date the meal and must not reach Gemini: either would be taken
+    # for part of the dish. The time goes first because its position (the first or the last token)
+    # is judged on the text as typed, "вчора" included.
+    text, at = strip_meal_time(text)
     text, yesterday = strip_yesterday(text)
+    if not text:
+        # a prompt reply of just "14:00" or "вчора" still names no dish: ask again rather than
+        # have Gemini estimate an empty description
+        await message.reply(i18n.FOOD_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
+        return
     est = await ai.estimate_food(
         None, None, text, on_retry=partial(message.reply, i18n.AI_RETRYING)
     )
     if not est.is_food:
         await message.reply(i18n.FOOD_NOT_FOOD)
         return
-    await record_food(message, user, est, repo, settings, source, yesterday=yesterday)
+    await record_food(message, user, est, repo, settings, source, yesterday=yesterday, at=at)
 
 
 async def cmd_food(
     message: Message, command: CommandObject, repo: SheetsRepo, ai: GeminiClient, settings: Settings
 ) -> None:
-    # the marker is stripped before the emptiness test, so a bare "/їжа вчора" is still the bare
-    # command: the prompt goes out and the description comes back as a reply (which may say
-    # "вчора" again)
-    text, _ = strip_yesterday(command.args)
+    # the time and the marker are stripped before the emptiness test, so a bare "/їжа вчора" or
+    # "/їжа 14:00" is still the bare command: the prompt goes out and the description comes back
+    # as a reply (which may state the time and "вчора" again - the bare command's are not kept)
+    text, _ = strip_yesterday(strip_meal_time(command.args)[0])
     if not text:
         await message.reply(i18n.FOOD_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
         return
