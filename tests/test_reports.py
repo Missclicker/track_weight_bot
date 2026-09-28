@@ -259,6 +259,7 @@ async def test_weekly_payload_without_a_profile(repo: FakeRepo) -> None:
         "age",
         "sex",
         "weight_current",
+        "weight_current_date",
         "weight_change_pct",
         "bmi",
         "bmr_kcal",
@@ -381,10 +382,35 @@ async def test_weekly_payload_current_weight_from_before_the_week(
     me = await _payload_of(repo, user)
 
     assert me["weight_current"] == 86.0
+    assert me["weight_current_date"] == "2026-08-20"  # so the report can say it is not this week's
     assert me["bmi"] == 26.5  # 86 / 3.24
     assert (me["weight_first"], me["weight_last"], me["weight_entries"]) == (None, None, 0)
     assert me["weight_change_pct"] is None
     assert me["previous_week"] is None  # 08-20 is before the previous window too
+
+
+@pytest.mark.parametrize(
+    ("kg", "day"),
+    [("", "2026-08-25"), ("0", "2026-08-25"), ("abc", "2026-08-25"), (99, "1.09.2026")],
+    ids=["blank", "zero", "garbage", "non-iso-date"],
+)
+async def test_a_broken_last_weight_row_does_not_hide_the_one_before(
+    repo: FakeRepo, user: User, kg: object, day: str
+) -> None:
+    """The weight read reaches back to the first row ever, so one hand-edited cell must not wipe
+    every number sized on the weight - or feed the model "0 kg"."""
+    _profiled(user)
+    await repo.add_weight(user, 86.0, _dt(date(2026, 8, 20), 7), "text")
+    await repo.add_food(user, _food(1800), _dt(date(2026, 9, 2)), "photo", 1)
+    # "1.09.2026" sorts inside "0001-01-01".."2026-09-07" as a string, so it is read back too
+    repo.rows["weight"].append(
+        {**repo.rows["weight"][0], "ts": "2026-08-30T07:00:00+03:00", "date": day, "kg": kg}
+    )
+
+    me = await _payload_of(repo, user)
+
+    assert (me["weight_current"], me["weight_current_date"]) == (86.0, "2026-08-20")
+    assert me["bmi"] == 26.5
 
 
 async def test_weekly_payload_previous_week(repo: FakeRepo, user: User) -> None:

@@ -111,6 +111,25 @@ def _dated_between(rows: _Rows, start: date, end: date) -> _Rows:
     return [r for r in rows if lo <= str(r.get("date", "")) <= hi]
 
 
+def _last_usable_weight(rows: _Rows) -> dict[str, Any] | None:
+    """The latest weigh-in that can stand for the person's current weight, or None.
+
+    The read reaches back to the first row ever, so one hand-edited cell - an empty or zero `kg`,
+    or a date that is not ISO and only sorts into the window by accident - must not hide every
+    earlier weigh-in, or hand the model "0 kg" and the targets built on it.
+    """
+    for row in reversed(rows):
+        kg = num_or_none(row.get("kg"))
+        if kg is None or kg <= 0:
+            continue
+        try:
+            date.fromisoformat(str(row.get("date", "")))
+        except ValueError:
+            continue
+        return row
+    return None
+
+
 def _is_late_meal(row: dict[str, Any]) -> bool:
     at = ts_time(row.get("ts"))
     if at is None or at < nutrition.LATE_MEAL_FROM:
@@ -227,7 +246,8 @@ async def build_weekly_payload(repo: Repo, chat_id: int, week_start: date) -> di
         if not (food or sport or weights):
             continue
 
-        weight_current = num_or_none(weight_rows[-1].get("kg")) if weight_rows else None
+        current_row = _last_usable_weight(weight_rows)
+        weight_current = num(current_row.get("kg")) if current_row else None
         age = nutrition.age_on(user.birth_year, week_end)
         reference_kg = nutrition.reference_weight(weight_current, user.target_kg)
         g_per_kg = nutrition.protein_g_per_kg(age)
@@ -264,6 +284,7 @@ async def build_weekly_payload(repo: Repo, chat_id: int, week_start: date) -> di
                 "age": age,
                 "sex": user.sex,
                 "weight_current": weight_current,
+                "weight_current_date": str(current_row.get("date")) if current_row else None,
                 "bmi": nutrition.bmi(weight_current, user.height_cm),
                 "bmr_kcal": round(bmr) if bmr is not None else None,
                 "maintenance_kcal_est": round(maintenance) if maintenance is not None else None,

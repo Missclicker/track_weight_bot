@@ -201,7 +201,10 @@ resistance), which is why guidance for older adults sits at 1.0-1.2 g/kg and hig
 or a deficit - the group chose 1.5 from 40. The kilograms are the target weight when it is set and
 below the current weight, otherwise the current weight: g/kg of a body weight carrying a lot of fat
 overshoots, and the target weight is the practical proxy. `weight_current` is the last weigh-in on
-or before `week_end`, however old, so somebody who skipped the scale this week still gets a target.
+or before `week_end`, however old, so somebody who skipped the scale this week still gets a target;
+its date travels along as `weight_current_date` so the model does not present an old weigh-in as
+this week's, and a row whose `kg` is blank, zero or unparseable or whose `date` is not ISO (a hand
+edit) is passed over for the one before it instead of wiping every number sized on the weight.
 From it come `bmi`, `bmr_kcal` (Mifflin-St Jeor, which also needs height, age and sex) and
 `maintenance_kcal_est` = 1.2 x BMR + this week's sport kcal / 7 - the *sedentary* factor, because
 the logged sport is added on top and an activity level would count it twice. It is rough, easily

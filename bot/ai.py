@@ -394,7 +394,8 @@ _REPORT_LINES = (
     "Баланс: energy_share_pct, veg_share_avg, alcohol_kcal / alcohol_days, late_meals, "
     "meals_per_logged_day.\n"
     "Активність: sport_sessions, sport_minutes, sport_kcal.\n"
-    "Вага: weight_current, weight_delta / weight_change_pct, bmi.\n"
+    "Вага: weight_current (weighed on weight_current_date - say so when that is before "
+    "week_start), weight_delta / weight_change_pct, bmi.\n"
     "Динаміка: the change against previous_week - only for what actually exists.\n"
     "На цей тиждень: 2-3 concrete, measurable recommendations, each on its own line starting "
     'with "- " (a number of grams, meals, days or minutes rather than "eat better").\n'
@@ -410,7 +411,10 @@ _SIMPLIFIED_MODE = (
     'their own birth year, sex and height, for example "/профіль 1981 ч 180", turns on a '
     "personalised protein norm and energy estimate. A person with an age but a null bmr_kcal "
     "(sex or height missing) keeps the protein comparison and gets the same single hint for the "
-    "energy estimate.\n"
+    "energy estimate. A null weight_current means the person has never weighed in, which also "
+    "leaves the protein target, bmi, bmr_kcal and maintenance_kcal_est null whatever the profile "
+    "says: then the hint is to post their weight as a plain number (for example 84.3), not to "
+    "send /профіль again.\n"
 )
 
 # The model is told the rule so it can explain the number, but the number itself is the bot's:
@@ -436,8 +440,12 @@ _DATA_NOTES = (
     "..._avg_per_day value: never divide weekly totals by 7 "
     "yourself, and treat days without entries as missed logging, not as days without eating. "
     "A logged day may also be only partially logged, so hedge instead of presenting a low average "
-    "as proven undereating. Do not invent data that is not in the JSON. "
-    "Field notes: `energy_share_pct` is each part's share, in %, of 4 kcal per g of protein + "
+    "as proven undereating. When `days_with_food_logged` is 0 the food averages and day counts "
+    "carry no information (they are 0 or null): say food was not logged rather than reporting "
+    "0 kcal or 0 g - the same holds for previous_week. Do not invent data that is not in the JSON. "
+    "Field notes: `weight_current` is the last weigh-in on or before week_end, possibly older than "
+    "the week (`weight_current_date`), and bmi, bmr_kcal and the protein target are sized on it. "
+    "`energy_share_pct` is each part's share, in %, of 4 kcal per g of protein + "
     "9 per g of fat + 4 per g of carbs + alcohol_kcal. `days` has one entry per logged food day "
     "(`entries` is the number of food entries that day). `late_meals` counts entries logged at "
     "or after 21:00 local time (entries filed under an earlier day are not counted). "

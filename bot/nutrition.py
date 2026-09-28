@@ -20,8 +20,10 @@ PROTEIN_G_PER_KG_FROM_40 = 1.5
 # Sport is logged and its kcal are added on top (`maintenance_kcal`), so the BMR multiplier has to
 # cover everyday life only: an "active" factor would count the logged workouts twice.
 SEDENTARY_FACTOR = 1.2
-# A meal logged at or after this local time counts as late. Compared with `parsing.ts_time`'s
-# "HH:MM", which orders correctly as a string.
+# A meal logged at or after this local time counts as late: for people who go to bed around
+# 23:00-24:00 it is the last two or three hours before sleep, where evening snacking tends to pile
+# up - a signal for the model to look at, not a rule. Compared with `parsing.ts_time`'s "HH:MM",
+# which orders correctly as a string.
 LATE_MEAL_FROM = "21:00"
 
 _MAX_AGE = 120  # a birth year typed into the sheet can still be a typo; no age beyond this is real
