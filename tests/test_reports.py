@@ -19,18 +19,26 @@ from tests.conftest import FakeRepo
 KYIV = ZoneInfo("Europe/Kyiv")
 
 
-def _dt(day: date, hour: int = 12) -> datetime:
-    return datetime(day.year, day.month, day.day, hour, tzinfo=KYIV)
+def _dt(day: date, hour: int = 12, minute: int = 0) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=KYIV)
 
 
-def _food(kcal: float, alcohol: float = 0, veg: float = 0.3) -> FoodEstimate:
+def _food(
+    kcal: float,
+    alcohol: float = 0,
+    veg: float = 0.3,
+    *,
+    protein: float = 20,
+    fat: float = 10,
+    carbs: float = 50,
+) -> FoodEstimate:
     return FoodEstimate(
         dish="тест",
         kcal=kcal,
         alcohol_kcal=alcohol,
-        protein_g=20,
-        fat_g=10,
-        carbs_g=50,
+        protein_g=protein,
+        fat_g=fat,
+        carbs_g=carbs,
         veg_share=veg,
         confidence=0.6,
     )
@@ -144,6 +152,356 @@ def test_weekly_stats_block_formats_delta() -> None:
     assert "-0.8" in block
     assert "85 -> 84.2" in block
     assert "≈1500/день за 2 дн. із записами" in block  # not 3000/7
+    assert "білок" not in block  # a dict without the protein keys still formats
+
+
+# -- the nutritionist numbers of the weekly payload ----------------------------------------------
+
+WEEK = date(2026, 9, 1)  # a window 2026-09-01..2026-09-07; the previous one is 08-25..08-31
+
+
+def _profiled(user: User, *, target_kg: float | None = 80.0) -> User:
+    """The `user` fixture with a whole profile: born 1981 (45 in 2026), a man, 180 cm."""
+    user.birth_year, user.sex, user.height_cm, user.target_kg = 1981, "m", 180.0, target_kg
+    return user
+
+
+async def _payload_of(repo: FakeRepo, user: User) -> dict:
+    await repo.upsert_user(user)
+    payload = await build_weekly_payload(repo, user.chat_id, WEEK)
+    return next(u for u in payload["users"] if u["name"] == user.name)
+
+
+async def test_weekly_payload_names_the_previous_window(repo: FakeRepo) -> None:
+    payload = await build_weekly_payload(repo, -100, WEEK)
+    assert payload["previous_week_start"] == "2026-08-25"
+    assert payload["previous_week_end"] == "2026-08-31"
+
+
+async def test_weekly_payload_full_profile(repo: FakeRepo, user: User) -> None:
+    """45 years old: 1.5 g/kg of the 80 kg target (lower than the 84 kg on the scale)."""
+    _profiled(user)
+    await repo.add_weight(user, 85.0, _dt(date(2026, 9, 1), 7), "text")
+    await repo.add_weight(user, 84.0, _dt(date(2026, 9, 7), 7), "text")
+    await repo.add_weight(user, 90.0, _dt(date(2026, 9, 8), 7), "text")  # after the window
+    # 09-01: 2200 kcal (over the 2000 target), 130 g protein (target met)
+    await repo.add_food(user, _food(1200, protein=70), _dt(date(2026, 9, 1), 9), "photo", 1)
+    await repo.add_food(user, _food(1000, protein=60), _dt(date(2026, 9, 1), 14), "photo", 2)
+    # 09-02: 1500 kcal with 300 of alcohol, 50 g protein
+    await repo.add_food(
+        user, _food(1500, alcohol=300, protein=50), _dt(date(2026, 9, 2)), "text", 3
+    )
+    # 09-03: 1800 kcal, 120 g protein - exactly the target counts as met
+    await repo.add_food(user, _food(1800, protein=120), _dt(date(2026, 9, 3)), "photo", 4)
+    await repo.add_sport(user, "біг", 30, 5, 420, _dt(date(2026, 9, 2), 7), "text")
+    await repo.add_sport(user, "зал", 60, None, 280, _dt(date(2026, 9, 4), 18), "text")
+
+    me = await _payload_of(repo, user)
+
+    # the existing keys keep their meaning
+    assert (me["days_with_food_logged"], me["food_entries"]) == (3, 4)
+    assert (me["kcal_total"], me["kcal_avg_per_day"]) == (5500, 1833)
+    assert (me["protein_g"], me["fat_g"], me["carbs_g"]) == (300, 40, 200)
+    assert (me["weight_first"], me["weight_last"], me["weight_delta"]) == (85.0, 84.0, -1.0)
+    assert me["sport_kcal"] == 700
+    # averages over the logged days, like kcal_avg_per_day
+    assert me["protein_g_avg_per_day"] == 100
+    assert me["fat_g_avg_per_day"] == 13
+    assert me["carbs_g_avg_per_day"] == 67
+    assert me["meals_per_logged_day"] == 1.3
+    assert me["alcohol_days"] == 1
+    assert me["days_over_kcal_target"] == 1
+    # the profile
+    assert (me["age"], me["sex"]) == (45, "m")
+    assert me["weight_current"] == 84.0  # the last weigh-in of the window, not the one after it
+    assert me["weight_change_pct"] == -1.2  # -1.0 / 85 * 100
+    assert me["bmi"] == 25.9  # 84 / 1.8^2
+    assert me["bmr_kcal"] == 1745  # 10*84 + 6.25*180 - 5*45 + 5
+    assert me["maintenance_kcal_est"] == 2194  # 1.2 * 1745 + 700 / 7
+    # protein
+    assert me["reference_weight_kg"] == 80.0
+    assert me["protein_target_g_per_kg"] == 1.5
+    assert me["protein_target_g_per_day"] == 120
+    assert me["protein_g_per_kg_avg"] == 1.25  # 100 / 80
+    assert me["days_protein_target_met"] == 2
+    assert me["previous_week"] is None  # nothing logged in 08-25..08-31
+
+
+async def test_weekly_payload_under_40_and_no_lower_target(repo: FakeRepo, user: User) -> None:
+    """1.2 g/kg below 40, and the scale weight as the reference when the target is not lower."""
+    _profiled(user, target_kg=90.0)
+    user.birth_year, user.sex = 1990, "f"  # 36 in 2026
+    await repo.add_weight(user, 70.0, _dt(date(2026, 9, 3), 7), "text")
+    await repo.add_food(user, _food(1800, protein=77), _dt(date(2026, 9, 3)), "photo", 1)
+
+    me = await _payload_of(repo, user)
+
+    assert me["age"] == 36
+    assert me["reference_weight_kg"] == 70.0
+    assert me["protein_target_g_per_kg"] == 1.2
+    assert me["protein_target_g_per_day"] == 84
+    assert me["protein_g_per_kg_avg"] == 1.1
+    assert me["days_protein_target_met"] == 0
+    assert me["bmr_kcal"] == 1484  # 10*70 + 6.25*180 - 5*36 - 161
+    assert me["maintenance_kcal_est"] == 1781  # 1.2 * 1484, no sport logged
+
+
+async def test_weekly_payload_without_a_profile(repo: FakeRepo) -> None:
+    """No birth year, sex, height, target or weight: every derived number is null, not guessed."""
+    maria = User(user_id=2, chat_id=-100, name="Марія")
+    await repo.add_food(maria, _food(1500, protein=64), _dt(date(2026, 9, 2)), "text", 1)
+    await repo.add_food(maria, _food(1500, protein=56), _dt(date(2026, 9, 4)), "text", 2)
+
+    me = await _payload_of(repo, maria)
+
+    assert me["protein_g_avg_per_day"] == 60  # still there, as a plain number
+    for key in (
+        "age",
+        "sex",
+        "weight_current",
+        "weight_change_pct",
+        "bmi",
+        "bmr_kcal",
+        "maintenance_kcal_est",
+        "reference_weight_kg",
+        "protein_target_g_per_kg",
+        "protein_target_g_per_day",
+        "protein_g_per_kg_avg",
+        "days_protein_target_met",
+        "days_over_kcal_target",
+        "previous_week",
+    ):
+        assert me[key] is None, key
+
+
+async def test_weekly_payload_weighed_but_no_birth_year(repo: FakeRepo) -> None:
+    """A weight alone gives g/kg against the scale weight, but no target without an age."""
+    maria = User(user_id=2, chat_id=-100, name="Марія", height_cm=165.0)
+    await repo.add_weight(maria, 60.0, _dt(date(2026, 9, 2), 7), "text")
+    await repo.add_food(maria, _food(1500, protein=66), _dt(date(2026, 9, 2)), "text", 1)
+
+    me = await _payload_of(repo, maria)
+
+    assert me["reference_weight_kg"] == 60.0
+    assert me["protein_g_per_kg_avg"] == 1.1
+    assert me["bmi"] == 22.0
+    assert me["protein_target_g_per_kg"] is None
+    assert me["protein_target_g_per_day"] is None
+    assert me["days_protein_target_met"] is None
+    assert me["bmr_kcal"] is None  # needs the age and the sex as well
+    assert me["maintenance_kcal_est"] is None
+
+
+async def test_weekly_payload_energy_shares_and_days(repo: FakeRepo, user: User) -> None:
+    day1, day2 = date(2026, 9, 2), date(2026, 9, 5)
+    # logged out of order: `days` still comes out in date order
+    await repo.add_food(
+        user, _food(900, alcohol=150, protein=50, fat=30, carbs=100), _dt(day2, 19), "photo", 3
+    )
+    await repo.add_food(user, _food(600, protein=30, fat=10, carbs=60), _dt(day1, 8), "photo", 1)
+    await repo.add_food(user, _food(400, protein=20, fat=10, carbs=40), _dt(day1, 13), "photo", 2)
+
+    me = await _payload_of(repo, user)
+
+    # 4*100 + 9*50 + 4*200 + 150 = 400 + 450 + 800 + 150 = 1800
+    assert me["energy_share_pct"] == {"protein": 22, "fat": 25, "carbs": 44, "alcohol": 8}
+    assert me["days"] == [
+        {"date": "2026-09-02", "kcal": 1000, "protein_g": 50, "alcohol_kcal": 0, "entries": 2},
+        {"date": "2026-09-05", "kcal": 900, "protein_g": 50, "alcohol_kcal": 150, "entries": 1},
+    ]
+    assert me["alcohol_days"] == 1
+    assert me["meals_per_logged_day"] == 1.5
+
+
+async def test_weekly_payload_without_food(repo: FakeRepo, user: User) -> None:
+    """Somebody here for sport only: the food numbers are zero or null, never a division by 0."""
+    _profiled(user)
+    await repo.add_weight(user, 84.0, _dt(date(2026, 9, 2), 7), "text")
+    await repo.add_sport(user, "біг", 30, 5, 420, _dt(date(2026, 9, 2)), "text")
+
+    me = await _payload_of(repo, user)
+
+    assert me["protein_g_avg_per_day"] == 0
+    assert me["fat_g_avg_per_day"] == 0
+    assert me["carbs_g_avg_per_day"] == 0
+    assert me["energy_share_pct"] is None
+    assert me["days"] == []
+    assert me["meals_per_logged_day"] is None
+    assert (me["alcohol_days"], me["late_meals"]) == (0, 0)
+    assert me["days_over_kcal_target"] == 0
+    assert me["protein_g_per_kg_avg"] is None
+    assert me["protein_target_g_per_day"] == 120  # the target itself needs no food
+    assert me["days_protein_target_met"] == 0
+
+
+async def test_weekly_payload_late_meals(repo: FakeRepo, user: User) -> None:
+    await repo.add_food(user, _food(500), _dt(date(2026, 9, 1), 21), "photo", 1)  # 21:00 counts
+    await repo.add_food(user, _food(500), _dt(date(2026, 9, 1), 20, 59), "photo", 2)
+    await repo.add_food(user, _food(500), _dt(date(2026, 9, 2), 23, 30), "photo", 3)
+    # "вчора" typed on 09-04 at 22:00 files the meal under 09-03: the clock says when it was
+    # typed, not when it was eaten, so it is no late meal
+    await repo.add_food(
+        user, _food(500), _dt(date(2026, 9, 4), 22), "text", 4, day=date(2026, 9, 3)
+    )
+    # a hand-edited row without a usable time is no late meal either
+    repo.rows["food"].append({**repo.rows["food"][0], "ts": "2026-09-05", "message_id": 5})
+
+    me = await _payload_of(repo, user)
+
+    assert me["food_entries"] == 5
+    assert me["late_meals"] == 2
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [(2000.0, 1), (None, None), (0.0, None), (-100.0, None), (float("inf"), None)],
+    ids=["target", "none", "zero", "negative", "inf"],
+)
+async def test_weekly_payload_days_over_kcal_target(
+    repo: FakeRepo, user: User, target: float | None, expected: int | None
+) -> None:
+    user.daily_kcal_target = target
+    await repo.add_food(user, _food(2100), _dt(date(2026, 9, 1)), "photo", 1)
+    await repo.add_food(user, _food(2000), _dt(date(2026, 9, 2)), "photo", 2)  # not over
+
+    me = await _payload_of(repo, user)
+
+    assert me["days_over_kcal_target"] == expected
+
+
+async def test_weekly_payload_current_weight_from_before_the_week(
+    repo: FakeRepo, user: User
+) -> None:
+    """The last weigh-in may be weeks old: it still sizes the targets, but is not this week's."""
+    _profiled(user)
+    await repo.add_weight(user, 88.0, _dt(date(2026, 8, 1), 7), "text")
+    await repo.add_weight(user, 86.0, _dt(date(2026, 8, 20), 7), "text")
+    await repo.add_food(user, _food(1800), _dt(date(2026, 9, 2)), "photo", 1)
+
+    me = await _payload_of(repo, user)
+
+    assert me["weight_current"] == 86.0
+    assert me["bmi"] == 26.5  # 86 / 3.24
+    assert (me["weight_first"], me["weight_last"], me["weight_entries"]) == (None, None, 0)
+    assert me["weight_change_pct"] is None
+    assert me["previous_week"] is None  # 08-20 is before the previous window too
+
+
+async def test_weekly_payload_previous_week(repo: FakeRepo, user: User) -> None:
+    _profiled(user)
+    # the previous window, 08-25..08-31
+    await repo.add_weight(user, 86.0, _dt(date(2026, 8, 25), 7), "text")
+    await repo.add_weight(user, 85.5, _dt(date(2026, 8, 31), 7), "text")
+    await repo.add_food(user, _food(2400, veg=0.5, protein=64), _dt(date(2026, 8, 26)), "photo", 1)
+    await repo.add_food(
+        user, _food(1600, alcohol=100, veg=0.1, protein=56), _dt(date(2026, 8, 28)), "photo", 2
+    )
+    await repo.add_sport(user, "біг", 45, 7, 600, _dt(date(2026, 8, 27)), "text")
+    await repo.add_food(user, _food(9999), _dt(date(2026, 8, 24)), "photo", 3)  # before both
+    # this window
+    await repo.add_weight(user, 85.0, _dt(date(2026, 9, 2), 7), "text")
+    await repo.add_food(user, _food(1900, protein=100), _dt(date(2026, 9, 2)), "photo", 4)
+
+    me = await _payload_of(repo, user)
+
+    # the previous week's rows stay out of this week's numbers
+    assert (me["kcal_total"], me["days_with_food_logged"], me["sport_sessions"]) == (1900, 1, 0)
+    assert (me["weight_first"], me["weight_entries"]) == (85.0, 1)
+    assert me["previous_week"] == {
+        "days_with_food_logged": 2,
+        "kcal_avg_per_day": 2000,
+        "protein_g_avg_per_day": 60,
+        "protein_g_per_kg_avg": 0.75,  # 60 / the 80 kg target
+        "alcohol_kcal": 100,
+        "veg_share_avg": 0.3,
+        "sport_sessions": 1,
+        "sport_minutes": 45,
+        "weight_last": 85.5,
+        "weight_delta": -0.5,
+    }
+
+
+async def test_previous_week_uses_this_weeks_reference_weight(repo: FakeRepo, user: User) -> None:
+    """Both g/kg averages divide by the same kilograms, or the week-over-week change would
+    partly be the scale moving rather than what was eaten."""
+    _profiled(user, target_kg=None)
+    await repo.add_weight(user, 86.0, _dt(date(2026, 8, 27), 7), "text")
+    await repo.add_food(user, _food(1800, protein=60), _dt(date(2026, 8, 27)), "photo", 1)
+    await repo.add_weight(user, 84.0, _dt(date(2026, 9, 3), 7), "text")
+    await repo.add_food(user, _food(1800, protein=84), _dt(date(2026, 9, 3)), "photo", 2)
+
+    me = await _payload_of(repo, user)
+
+    assert me["reference_weight_kg"] == 84.0
+    assert me["protein_g_per_kg_avg"] == 1.0
+    assert me["previous_week"]["protein_g_per_kg_avg"] == 0.71  # 60 / 84, not 60 / 86
+    assert me["previous_week"]["weight_last"] == 86.0
+
+
+async def test_weekly_payload_skips_a_user_active_only_before_the_week(
+    repo: FakeRepo, user: User
+) -> None:
+    """Which people appear is unchanged: the wider reads must not bring back last week's."""
+    await repo.upsert_user(user)
+    await repo.add_food(user, _food(1800), _dt(date(2026, 8, 28)), "photo", 1)
+    await repo.add_weight(user, 84.0, _dt(date(2026, 8, 29), 7), "text")
+    payload = await build_weekly_payload(repo, -100, WEEK)
+    assert payload["users"] == []
+
+
+async def test_weekly_payload_reads_each_tab_once_per_user(repo: FakeRepo, user: User) -> None:
+    """Every read scans a whole tab against a per-minute quota: two weeks cost no extra read."""
+    other = User(user_id=2, chat_id=-100, name="Марія")
+    silent = User(user_id=3, chat_id=-100, name="Мовчун")
+    stranger = User(user_id=4, chat_id=-200, name="Чужий")
+    for u in (user, other, silent, stranger):
+        await repo.upsert_user(u)
+    await repo.add_food(user, _food(1800), _dt(date(2026, 9, 2)), "photo", 1)
+    await repo.add_food(user, _food(1800), _dt(date(2026, 8, 27)), "photo", 2)
+    await repo.add_sport(other, "біг", 30, 5, 420, _dt(date(2026, 9, 2)), "text")
+
+    calls: list[tuple[str, int, date, date]] = []
+    real = repo.user_rows_between
+
+    async def counting(tab: str, user_id: int, start: date, end: date) -> list[dict]:
+        calls.append((tab, user_id, start, end))
+        return await real(tab, user_id, start, end)
+
+    repo.user_rows_between = counting  # type: ignore[method-assign]
+    await build_weekly_payload(repo, -100, WEEK)
+
+    prev_start, week_end = date(2026, 8, 25), date(2026, 9, 7)
+    for uid in (1, 2, 3):  # the silent member is read too, the other chat's member is not
+        assert [c for c in calls if c[1] == uid] == [
+            ("food", uid, prev_start, week_end),
+            ("sport", uid, prev_start, week_end),
+            ("weight", uid, date.min, week_end),
+        ]
+    assert len(calls) == 9
+
+
+def test_weekly_stats_block_shows_protein() -> None:
+    base = {
+        "name": "Олексій",
+        "kcal_total": 5500,
+        "kcal_avg_per_day": 1833,
+        "days_with_food_logged": 3,
+        "alcohol_kcal": 0,
+        "sport_minutes": 0,
+        "sport_kcal": 0,
+        "weight_first": None,
+        "weight_last": None,
+        "weight_delta": None,
+        "protein_g_avg_per_day": 100,
+    }
+    with_target = i18n.weekly_stats_block({**base, "protein_target_g_per_day": 120})
+    assert "; білок ≈100 г/день (норма 120 г)" in with_target
+    without = i18n.weekly_stats_block({**base, "protein_target_g_per_day": None})
+    assert "білок ≈100 г/день" in without
+    assert "норма" not in without
+    # nothing logged to eat: no protein part at all, like the kcal average
+    no_food = i18n.weekly_stats_block({**base, "days_with_food_logged": 0, "kcal_total": 0})
+    assert "білок" not in no_food
 
 
 async def test_day_food_keeps_order_and_totals(repo: FakeRepo, user: User) -> None:

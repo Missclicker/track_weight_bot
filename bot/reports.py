@@ -8,11 +8,12 @@ Telegram-sized messages.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, NamedTuple, Protocol
 
-from bot import i18n
+from bot import i18n, nutrition
 from bot.parsing import ts_time
 from bot.sheets import User, num, num_or_none
 
@@ -82,55 +83,206 @@ async def today_summary(repo: Repo, user: User, today: date) -> TodaySummary:
     )
 
 
+_Rows = list[dict[str, Any]]
+
+# What `previous_week` carries: a subset of what `_window_numbers` computes for any window, so the
+# week-over-week comparison measures both weeks by one definition that cannot drift apart.
+_PREVIOUS_WEEK_KEYS = (
+    "days_with_food_logged",
+    "kcal_avg_per_day",
+    "protein_g_avg_per_day",
+    "protein_g_per_kg_avg",
+    "alcohol_kcal",
+    "veg_share_avg",
+    "sport_sessions",
+    "sport_minutes",
+    "weight_last",
+    "weight_delta",
+)
+
+
+def _dated_between(rows: _Rows, start: date, end: date) -> _Rows:
+    """The rows whose `date` falls in `start..end`, in their order.
+
+    The same string test `user_rows_between` applies, so one wide read can be split into windows
+    in memory and every window still gets exactly the rows its own read would have returned.
+    """
+    lo, hi = start.isoformat(), end.isoformat()
+    return [r for r in rows if lo <= str(r.get("date", "")) <= hi]
+
+
+def _is_late_meal(row: dict[str, Any]) -> bool:
+    at = ts_time(row.get("ts"))
+    if at is None or at < nutrition.LATE_MEAL_FROM:
+        return False
+    # A row backdated with "вчора" keeps the moment the message was sent in `ts`, on another day
+    # than its `date`: that clock time says when it was typed, not when the meal was eaten.
+    return str(row.get("ts")).strip()[:10] == str(row.get("date", ""))
+
+
+def _window_numbers(
+    food: _Rows, sport: _Rows, weights: _Rows, reference_kg: float | None
+) -> dict[str, Any]:
+    """Everything one window's rows say, by the one definition both weeks of the report share.
+
+    `reference_kg` comes from the caller rather than from these rows: it is the current week's for
+    both windows, so the two g/kg averages divide by the same kilograms and can be compared.
+    """
+    per_day: dict[str, dict[str, float]] = {}
+    for r in food:
+        day = per_day.setdefault(
+            str(r.get("date")), {"kcal": 0.0, "protein_g": 0.0, "alcohol_kcal": 0.0, "entries": 0}
+        )
+        day["kcal"] += num(r.get("kcal"))
+        day["protein_g"] += num(r.get("protein_g"))
+        day["alcohol_kcal"] += num(r.get("alcohol_kcal"))
+        day["entries"] += 1
+    # The per-day figures are rounded before anything counts days against them, so a day the model
+    # is shown at 120 g is never a day that "missed" a 120 g target.
+    days = [
+        {
+            "date": day,
+            "kcal": round(sums["kcal"]),
+            "protein_g": round(sums["protein_g"]),
+            "alcohol_kcal": round(sums["alcohol_kcal"]),
+            "entries": int(sums["entries"]),
+        }
+        for day, sums in sorted(per_day.items())
+    ]
+    logged = len(days)
+
+    def per_logged_day(total: float) -> int:
+        # over the days food was logged, not over 7: an unlogged day is missed logging
+        return round(total / logged) if logged else 0
+
+    kcal_total = sum(num(r.get("kcal")) for r in food)
+    alcohol_total = sum(num(r.get("alcohol_kcal")) for r in food)
+    protein_total = sum(num(r.get("protein_g")) for r in food)
+    fat_total = sum(num(r.get("fat_g")) for r in food)
+    carbs_total = sum(num(r.get("carbs_g")) for r in food)
+    sport_kcal = sum(num(r.get("kcal")) for r in sport)
+    veg_values = [num(r.get("veg_share")) for r in food if r.get("veg_share") not in ("", None)]
+    w_first = num_or_none(weights[0].get("kg")) if weights else None
+    w_last = num_or_none(weights[-1].get("kg")) if weights else None
+    w_delta = round(w_last - w_first, 1) if w_first is not None and w_last is not None else None
+    protein_avg = per_logged_day(protein_total)
+    return {
+        "days_with_food_logged": logged,
+        "food_entries": len(food),
+        "kcal_total": round(kcal_total),
+        "kcal_avg_per_day": per_logged_day(kcal_total),
+        "alcohol_kcal": round(alcohol_total),
+        "protein_g": round(protein_total),
+        "fat_g": round(fat_total),
+        "carbs_g": round(carbs_total),
+        "veg_share_avg": round(sum(veg_values) / len(veg_values), 2) if veg_values else None,
+        "sport_sessions": len(sport),
+        "sport_minutes": round(sum(num(r.get("minutes")) for r in sport)),
+        "sport_kcal": round(sport_kcal),
+        "net_kcal": round(kcal_total - sport_kcal),
+        "weight_first": w_first,
+        "weight_last": w_last,
+        "weight_delta": w_delta,
+        "weight_entries": len(weights),
+        "weight_change_pct": round(w_delta / w_first * 100, 1)
+        if w_delta is not None and w_first
+        else None,
+        "protein_g_avg_per_day": protein_avg,
+        "fat_g_avg_per_day": per_logged_day(fat_total),
+        "carbs_g_avg_per_day": per_logged_day(carbs_total),
+        "protein_g_per_kg_avg": round(protein_avg / reference_kg, 2)
+        if logged and reference_kg
+        else None,
+        "energy_share_pct": nutrition.energy_shares(
+            protein_total, fat_total, carbs_total, alcohol_total
+        ),
+        "meals_per_logged_day": round(len(food) / logged, 1) if logged else None,
+        "alcohol_days": sum(1 for d in days if d["alcohol_kcal"] > 0),
+        "late_meals": sum(1 for r in food if _is_late_meal(r)),
+        "days": days,
+    }
+
+
 async def build_weekly_payload(repo: Repo, chat_id: int, week_start: date) -> dict[str, Any]:
-    """JSON-serialisable summary of 7 days starting at `week_start` for every active user."""
+    """JSON-serialisable summary of 7 days starting at `week_start` for every active user.
+
+    Besides the week's own numbers every person gets the ones a nutritionist reads them against
+    (protein target, BMI, BMR, a maintenance estimate - see `bot/nutrition.py`) and the previous 7
+    days measured the same way. All of it is computed here, so the model only interprets numbers
+    and never has to invent one; what cannot be computed is None.
+    """
     week_end = week_start + timedelta(days=6)
+    prev_start, prev_end = week_start - timedelta(days=7), week_start - timedelta(days=1)
     users_payload: list[dict[str, Any]] = []
     for user in await repo.get_active_users(chat_id):
-        food = await repo.user_rows_between("food", user.user_id, week_start, week_end)
-        sport = await repo.user_rows_between("sport", user.user_id, week_start, week_end)
-        weights = await repo.user_rows_between("weight", user.user_id, week_start, week_end)
+        # Three reads per person, as many as for one week: each one scans a whole tab against the
+        # Sheets per-minute read quota, so both windows come out of one wider read each. Weight
+        # goes back to the first row ever - the current weight may be a weigh-in from long ago.
+        food_rows = await repo.user_rows_between("food", user.user_id, prev_start, week_end)
+        sport_rows = await repo.user_rows_between("sport", user.user_id, prev_start, week_end)
+        weight_rows = await repo.user_rows_between("weight", user.user_id, date.min, week_end)
+        food = _dated_between(food_rows, week_start, week_end)
+        sport = _dated_between(sport_rows, week_start, week_end)
+        weights = _dated_between(weight_rows, week_start, week_end)
         if not (food or sport or weights):
             continue
-        days_with_food = {str(r.get("date")) for r in food}
-        kcal_total = sum(num(r.get("kcal")) for r in food)
-        veg_values = [num(r.get("veg_share")) for r in food if r.get("veg_share") not in ("", None)]
-        w_first = num_or_none(weights[0].get("kg")) if weights else None
-        w_last = num_or_none(weights[-1].get("kg")) if weights else None
+
+        weight_current = num_or_none(weight_rows[-1].get("kg")) if weight_rows else None
+        age = nutrition.age_on(user.birth_year, week_end)
+        reference_kg = nutrition.reference_weight(weight_current, user.target_kg)
+        g_per_kg = nutrition.protein_g_per_kg(age)
+        protein_target = (
+            round(g_per_kg * reference_kg)
+            if g_per_kg is not None and reference_kg is not None
+            else None
+        )
+        bmr = nutrition.bmr_mifflin(weight_current, user.height_cm, age, user.sex)
+        this = _window_numbers(food, sport, weights, reference_kg)
+        maintenance = nutrition.maintenance_kcal(bmr, this["sport_kcal"] / 7)
+        kcal_target = user.daily_kcal_target
+        # the same sanity rule as `i18n._target_suffix`: a zero or non-finite cell is no target
+        has_kcal_target = kcal_target is not None and math.isfinite(kcal_target) and kcal_target > 0
+
+        prev_food = _dated_between(food_rows, prev_start, prev_end)
+        prev_sport = _dated_between(sport_rows, prev_start, prev_end)
+        prev_weights = _dated_between(weight_rows, prev_start, prev_end)
+        previous: dict[str, Any] | None = None
+        if prev_food or prev_sport or prev_weights:
+            prev = _window_numbers(prev_food, prev_sport, prev_weights, reference_kg)
+            previous = {key: prev[key] for key in _PREVIOUS_WEEK_KEYS}
+
         users_payload.append(
             {
                 "name": user.name,
-                "days_with_food_logged": len(days_with_food),
-                "food_entries": len(food),
-                "kcal_total": round(kcal_total),
-                "kcal_avg_per_day": round(kcal_total / len(days_with_food))
-                if days_with_food
-                else 0,
-                "alcohol_kcal": round(sum(num(r.get("alcohol_kcal")) for r in food)),
-                "protein_g": round(sum(num(r.get("protein_g")) for r in food)),
-                "fat_g": round(sum(num(r.get("fat_g")) for r in food)),
-                "carbs_g": round(sum(num(r.get("carbs_g")) for r in food)),
-                "veg_share_avg": round(sum(veg_values) / len(veg_values), 2)
-                if veg_values
-                else None,
-                "sport_sessions": len(sport),
-                "sport_minutes": round(sum(num(r.get("minutes")) for r in sport)),
-                "sport_kcal": round(sum(num(r.get("kcal")) for r in sport)),
-                "net_kcal": round(kcal_total - sum(num(r.get("kcal")) for r in sport)),
-                "weight_first": w_first,
-                "weight_last": w_last,
-                "weight_delta": round(w_last - w_first, 1)
-                if w_first is not None and w_last is not None
-                else None,
-                "weight_entries": len(weights),
+                **this,
                 "target_kg": user.target_kg,
                 "daily_kcal_target": user.daily_kcal_target,
                 "height_cm": user.height_cm,
+                "days_over_kcal_target": sum(1 for d in this["days"] if d["kcal"] > kcal_target)
+                if has_kcal_target
+                else None,
+                "age": age,
+                "sex": user.sex,
+                "weight_current": weight_current,
+                "bmi": nutrition.bmi(weight_current, user.height_cm),
+                "bmr_kcal": round(bmr) if bmr is not None else None,
+                "maintenance_kcal_est": round(maintenance) if maintenance is not None else None,
+                "reference_weight_kg": reference_kg,
+                "protein_target_g_per_kg": g_per_kg,
+                "protein_target_g_per_day": protein_target,
+                "days_protein_target_met": sum(
+                    1 for d in this["days"] if d["protein_g"] >= protein_target
+                )
+                if protein_target is not None
+                else None,
+                "previous_week": previous,
             }
         )
     return {
         "week_start": week_start.isoformat(),
         "week_end": week_end.isoformat(),
+        "previous_week_start": prev_start.isoformat(),
+        "previous_week_end": prev_end.isoformat(),
         "users": users_payload,
     }
 

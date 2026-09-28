@@ -426,6 +426,15 @@ def weekly_stats_block(user: dict) -> str:
     if days:
         total += f" (≈{user['kcal_avg_per_day']:.0f}/день за {days} дн. із записами)"
     parts = [total]
+    # `.get`: the protein keys came later than the rest, and a payload without them still formats.
+    # The average is per logged day like the kcal one, so it is shown only when there is one.
+    protein = user.get("protein_g_avg_per_day")
+    if days and protein is not None:
+        part = f"білок ≈{protein:.0f} г/день"
+        target = user.get("protein_target_g_per_day")
+        if target is not None:
+            part += f" (норма {target:.0f} г)"
+        parts.append(part)
     if user["alcohol_kcal"]:
         parts.append(f"алкоголь {user['alcohol_kcal']:.0f} ккал")
     if user["sport_minutes"]:

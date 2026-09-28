@@ -21,10 +21,11 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
 | `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `parse_profile` (birth year or age, sex and height in any order, all-or-nothing, + the `ProfileUpdate` value object) / `parse_sex` (a typed word or a `users.sex` cell -> `"m"`/`"f"`), `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
+| `bot/nutrition.py` | Pure numbers for the weekly report, None in -> None out: `age_on`, the age-based `protein_g_per_kg` and the `reference_weight` it multiplies, `bmi`, `bmr_mifflin` (Mifflin-St Jeor), `maintenance_kcal` (sedentary BMR + logged sport) and `energy_shares` (see *Nutrition numbers* below). |
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report` (the only call with a role: `REPORT_SYSTEM_INSTRUCTION` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
-| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini); two pure helpers for the report text: `previous_advice` (last week's stored report minus its header and the prompt's `<<<`/`>>>` markers, or None when it carries no advice) and `split_message` (Telegram-sized pieces of at most 4000 characters). |
+| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini: per person the week's totals and per-logged-day averages, energy shares, a `days` list, late meals, the `nutrition.py` numbers and a `previous_week` block, both weeks measured by the one `_window_numbers`; three `user_rows_between` reads per person, split into the two windows in memory - see *Nutrition numbers*); two pure helpers for the report text: `previous_advice` (last week's stored report minus its header and the prompt's `<<<`/`>>>` markers, or None when it carries no advice) and `split_message` (Telegram-sized pieces of at most 4000 characters). |
 | `bot/scheduler.py` | `Jobs` (ping per timezone, water tick, weekly report) and `build_scheduler`. |
 | `bot/handlers/` | aiogram routers, one file per feature; `__init__.py` assembles them and holds the allowed-chat gate and the global error handler. |
 
@@ -180,6 +181,45 @@ still one report: the full text is stored once, in a single `reports` row, which
 next week's lookup reads back. It is stored as soon as one piece went out, even if a later send
 fails - the chat has read part of it - and the send error is then re-raised so `weekly_reports`
 logs the chat; when the first send fails nobody saw it, and nothing is stored.
+
+**Nutrition numbers.** Every number the report talks about is computed by the bot -
+`reports.build_weekly_payload` with the pure `bot/nutrition.py` - for the reason sport kcal come
+from the MET table: the model interprets numbers, it never computes or invents one. A figure it
+derived itself (a g/kg of a weight it picked, an average over 7 days instead of the logged ones)
+could be wrong and would disagree with what the bot shows next week, so the prompts only name the
+keys, and a value that cannot be computed is null, never a guess. Per person the payload adds the
+protein, fat and carbs averages per *logged* day (like `kcal_avg_per_day`), `energy_share_pct`
+(4 / 9 / 4 kcal per g plus the alcohol kcal; the macro energies, not `kcal_total`, are the
+denominator, because the model's kcal and macros do not always agree and the shares should add up
+to ~100), a `days` list (kcal, protein, alcohol and entries per logged day - the day counts against
+a target are taken from these rounded figures, so the two never disagree), `alcohol_days`,
+`meals_per_logged_day` and `days_over_kcal_target` (null without a target that passes the
+`i18n._target_suffix` rule). The protein target is `protein_g_per_kg(age)` x `reference_weight`:
+1.2 g/kg below 40, 1.5 g/kg from 40. The 0.8 g/kg RDA is for weight-stable adults; a calorie
+deficit raises the need to keep lean mass, and muscle responds less to protein with age (anabolic
+resistance), which is why guidance for older adults sits at 1.0-1.2 g/kg and higher with training
+or a deficit - the group chose 1.5 from 40. The kilograms are the target weight when it is set and
+below the current weight, otherwise the current weight: g/kg of a body weight carrying a lot of fat
+overshoots, and the target weight is the practical proxy. `weight_current` is the last weigh-in on
+or before `week_end`, however old, so somebody who skipped the scale this week still gets a target.
+From it come `bmi`, `bmr_kcal` (Mifflin-St Jeor, which also needs height, age and sex) and
+`maintenance_kcal_est` = 1.2 x BMR + this week's sport kcal / 7 - the *sedentary* factor, because
+the logged sport is added on top and an activity level would count it twice. It is rough, easily
+±15-20 % (a population formula plus MET-table sport), and the prompt says so. `late_meals` counts
+entries whose `ts` is at or after 21:00 *and* on the entry's own `date`: a row backdated with
+"вчора" keeps the moment it was sent in `ts`, so its clock time says nothing about when the meal was
+eaten. `previous_week` holds the 7 days before (`previous_week_start..previous_week_end`, both at
+the top level): days logged, the kcal and protein averages, g/kg, alcohol, vegetables, sport, the
+last weight and its delta, computed by the same `_window_numbers` as the current week so the two
+definitions cannot drift apart - except that its g/kg divides by *this* week's reference weight, so
+the two compare; it is null when that window has no rows. The extra window costs no extra read:
+every `user_rows_between` scans a whole tab against the Sheets per-minute read quota, so food and
+sport are read once over `previous_week_start..week_end`, weight once from `date.min`, and the
+rows are split into the windows by their `date` in memory - three reads per person, as before. Who
+appears is unchanged (rows in the current window). A person without a birth year, sex or height
+simply gets nulls - no age means no protein target, no BMR and no maintenance estimate; no sex or
+height, no BMR; no height, no BMI - and the simpler report with one hint at `/profile`. The numbers-only fallback
+(`i18n.weekly_stats_block`) shows the protein average and, when there is one, the target.
 
 **Water reminders.** One `water_tick` job runs every minute and walks an in-memory list of the
 active rows of the `water` tab, so a per-user interval costs neither a job per subscriber nor a
