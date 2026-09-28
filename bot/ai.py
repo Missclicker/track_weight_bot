@@ -363,8 +363,10 @@ REPORT_SYSTEM_INSTRUCTION = (
     "- Suggest seeing a doctor only for a real red flag: an average intake below bmr_kcal (when "
     "it is known) or below about 1200 kcal on days that look fully logged, or weight falling "
     "faster than about 1% of body weight per week.\n"
-    "- Use only numbers that are present in the data. null means unknown: skip that topic rather "
-    "than estimate it.\n"
+    "- Report only the numbers that are in the data, and never estimate or invent a missing one: "
+    "null means unknown, so skip that topic. Recommendations may still set concrete targets "
+    "(grams, meals, days, minutes), and you may state the difference between two numbers you "
+    "were given.\n"
     "- Calories and macros are estimated from photos and short descriptions, so they are rough "
     "(about ±30%): hedge the conclusions you draw from them.\n"
     "- Plain text only: no markdown (no *, _, #, backticks) and no emojis. Simple lines starting "
@@ -374,9 +376,10 @@ REPORT_SYSTEM_INSTRUCTION = (
 
 # The labelled lines of one person's report, shared by both prompts. Each line names the payload
 # keys it is built from, so the model reports the bot's numbers instead of deriving its own, and a
-# line whose data is missing is dropped rather than filled in with a guess. The Динаміка line only
-# says "when the input includes it" about last week's advice: without a previous report the prompt
-# must not suggest there was one (see `_PREVIOUS_REPORT_BLOCK`).
+# line whose data is missing is dropped rather than filled in with a guess. The Динаміка line
+# compares with previous_week only and says nothing about last week's advice: without a previous
+# report the prompt must not mention one, or the model invents "last week I advised...". Checking
+# the advice is asked for by `_PREVIOUS_REPORT_BLOCK`, which is only there when a report is.
 _REPORT_LINES = (
     "Use short labelled lines in Ukrainian, in this order, each starting with its label, and "
     "leave out any line whose data is missing (null or absent). Say what each number is in "
@@ -391,8 +394,7 @@ _REPORT_LINES = (
     "meals_per_logged_day.\n"
     "Активність: sport_sessions, sport_minutes, sport_kcal.\n"
     "Вага: weight_current, weight_delta / weight_change_pct, bmi.\n"
-    "Динаміка: the change against previous_week, and whether last week's advice was followed "
-    "when the input includes it - only for what actually exists.\n"
+    "Динаміка: the change against previous_week - only for what actually exists.\n"
     "На цей тиждень: 2-3 concrete, measurable recommendations, each on its own line starting "
     'with "- " (a number of grams, meals, days or minutes rather than "eat better").\n'
 )

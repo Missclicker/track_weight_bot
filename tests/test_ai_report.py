@@ -90,15 +90,33 @@ async def test_last_weeks_report_follows_the_data_as_a_delimited_block(personal:
     assert prompt.count("PREVIOUS REPORT") == 1
 
 
+@pytest.mark.parametrize("personal", [False, True])
 @pytest.mark.parametrize("previous", [None, "", "   \n "])
-async def test_no_previous_report_leaves_no_trace_in_the_prompt(previous: str | None) -> None:
+async def test_no_previous_report_leaves_no_trace_in_the_prompt(
+    previous: str | None, personal: bool
+) -> None:
+    """Not even a conditional mention: "check last week's advice when given" invites an invented
+    "last week I advised..." when nothing was given."""
     client, models = client_with(["звіт"])
-    await client.weekly_report(PAYLOAD, previous_report=previous)
+    await client.weekly_report(PAYLOAD, personal=personal, previous_report=previous)
     prompt = _prompt(models)
-    assert prompt == ai.REPORT_PROMPT.format(payload=_data())
-    assert "PREVIOUS REPORT" not in prompt
+    template = ai.PERSONAL_REPORT_PROMPT if personal else ai.REPORT_PROMPT
+    assert prompt == template.format(payload=_data())
     assert "<<<" not in prompt
-    assert "previous report" not in prompt.lower()
+    lowered = prompt.lower()
+    for phrase in ("previous report", "advice was followed", "last week's advice"):
+        assert phrase not in lowered
+
+
+def test_the_role_forbids_invented_numbers_but_not_targets() -> None:
+    """The prompts ask for concrete goals and week-over-week changes, which "use only numbers in
+    the data" would forbid: the rule is about never inventing a missing value."""
+    role = ai.REPORT_SYSTEM_INSTRUCTION
+    assert "use only numbers" not in role.lower()
+    assert "Report only the numbers that are in the data" in role
+    assert "never estimate or invent a missing one" in role
+    assert "Recommendations may still set concrete targets" in role
+    assert "the difference between two numbers you were given" in role
 
 
 @pytest.mark.parametrize("template", [ai.REPORT_PROMPT, ai.PERSONAL_REPORT_PROMPT])

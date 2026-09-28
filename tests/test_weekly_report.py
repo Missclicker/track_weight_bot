@@ -35,8 +35,14 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
         self.parse_modes: list[Any] = []
+        self.attempts = 0
+        # the 1-based send attempt that raises, e.g. a flood limit hit halfway through a report
+        self.fail_on: int | None = None
 
     async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> None:
+        self.attempts += 1
+        if self.attempts == self.fail_on:
+            raise RuntimeError("telegram said no")
         self.sent.append((chat_id, text))
         self.parse_modes.append(kwargs.get("parse_mode", "unset"))
 
@@ -345,6 +351,37 @@ async def test_a_failing_previous_report_lookup_still_sends_the_report(
     assert bot.sent == [(GROUP, text)]
     assert [row["text"] for row in repo.rows["reports"]] == [text]
     assert [r.levelname for r in caplog.records if r.exc_info] == ["WARNING"]
+
+
+async def test_a_report_seen_in_part_is_still_stored(repo: FakeRepo, user: User) -> None:
+    """The chat read the first piece, so next week must be able to follow its advice up - and the
+    failed send still reaches `weekly_reports`, which logs the chat."""
+    await _logged_week(repo, user)
+    paragraphs = ["А" * 2500, "Б" * 2500, "В" * 2500]
+    ai = FakeAI(answer="\n\n".join(paragraphs))
+    jobs, bot = _jobs(repo, _settings(str(GROUP)), ai)
+    bot.fail_on = 2
+
+    with pytest.raises(RuntimeError, match="telegram said no"):
+        await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    header = _header(WEEK_START)
+    assert bot.sent == [(GROUP, f"{header}\n\n{paragraphs[0]}")]
+    assert bot.attempts == 2  # nothing is sent after the failure
+    full = f"{header}\n\n" + "\n\n".join(paragraphs)
+    assert [row["text"] for row in repo.rows["reports"]] == [full]
+
+
+async def test_a_report_nobody_saw_is_not_stored(repo: FakeRepo, user: User) -> None:
+    await _logged_week(repo, user)
+    jobs, bot = _jobs(repo, _settings(str(GROUP)))
+    bot.fail_on = 1
+
+    with pytest.raises(RuntimeError, match="telegram said no"):
+        await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert bot.sent == []
+    assert repo.rows["reports"] == []
 
 
 async def test_a_long_report_is_sent_in_pieces_and_stored_once(repo: FakeRepo, user: User) -> None:

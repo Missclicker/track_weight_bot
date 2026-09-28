@@ -243,10 +243,21 @@ class Jobs:
         # A group report can outgrow one Telegram message, so every text - AI, numbers-only or
         # no-data - goes out in pieces, in order, and only the first carries the header. It is
         # still one report, stored once and whole: that is what next week's follow-up reads back.
-        # parse_mode=None: the AI text is free-form and would trip Telegram's HTML parser
-        for chunk in split_message(text):
-            await self.bot.send_message(chat_id, chunk, parse_mode=None)
-        await self.repo.add_report(week_start, chat_id, text, datetime.now(self.settings.tzinfo))
+        # A chat that got even the first piece has seen the report, so it is stored as soon as one
+        # piece went out, even when a later one fails: otherwise next week's follow-up would find
+        # nothing for advice people did read. The `finally` does not swallow that send error, so
+        # `weekly_reports` still logs the chat as failed. If the first send fails, nobody saw the
+        # report and nothing is stored.
+        sent = False
+        try:
+            for chunk in split_message(text):
+                # parse_mode=None: the AI text is free-form and would trip Telegram's HTML parser
+                await self.bot.send_message(chat_id, chunk, parse_mode=None)
+                sent = True
+        finally:
+            if sent:
+                now = datetime.now(self.settings.tzinfo)
+                await self.repo.add_report(week_start, chat_id, text, now)
         return text
 
 

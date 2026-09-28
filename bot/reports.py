@@ -139,9 +139,12 @@ async def build_weekly_payload(repo: Repo, chat_id: int, week_start: date) -> di
 # emojis, so its text is almost entirely in the BMP where both counts agree; the margin covers the
 # odd astral character and keeps a message clear of the edge.
 MESSAGE_LIMIT = 4000
-# Bounds what last week's report can add to the prompt: the stored cell is editable by hand, and a
-# follow-up needs the advice, not a novel.
-_MAX_ADVICE_CHARS = 3000
+# Only bounds a hand-edited cell: a report the bot stored stays far below it (~1100 characters a
+# person in a group), and it must stay far above that, or the last people of a larger group would
+# lose last week's advice to the cut.
+_MAX_ADVICE_CHARS = 8000
+# What the prompt wraps last week's text in (see `ai._PREVIOUS_REPORT_BLOCK`).
+_BLOCK_MARKERS = ("<<<", ">>>")
 
 
 def previous_advice(text: str | None) -> str | None:
@@ -150,7 +153,7 @@ def previous_advice(text: str | None) -> str | None:
     A numbers-only fallback (`i18n.WEEKLY_AI_FAILED`) and a no-data report (`i18n.WEEKLY_NO_DATA`)
     carry no advice, so they count as no previous report at all: handing one over would only
     invite the model to follow up on advice nobody gave. The header line is our own date range,
-    not the model's words, and is dropped.
+    not the model's words, and is dropped; so is every "<<<" and ">>>".
     """
     if text is None or not text.strip():
         return None
@@ -158,24 +161,39 @@ def previous_advice(text: str | None) -> str | None:
         return None
     header = i18n.WEEKLY_HEADER.split("{", 1)[0].strip()
     first, _, rest = text.strip().partition("\n")
-    advice = (rest if first.startswith(header) else text).strip()
-    return advice[:_MAX_ADVICE_CHARS] or None
+    advice = rest if first.startswith(header) else text
+    # The cell is editable by hand, and a ">>>" inside it would close the prompt's data block early
+    # and let the rest read as instructions. No report needs the markers, so they go - in a loop,
+    # because cutting one out can join its neighbours into another ("<<>>><" -> "<<<") - and before
+    # the cap, so the cap counts only what the model is actually given.
+    while any(marker in advice for marker in _BLOCK_MARKERS):
+        for marker in _BLOCK_MARKERS:
+            advice = advice.replace(marker, "")
+    return advice.strip()[:_MAX_ADVICE_CHARS] or None
 
 
 def _split_point(text: str, limit: int) -> int:
     """Where to cut `text` so the piece before the cut fits in `limit` characters.
 
-    A paragraph break wins, then a line break - but only in the second half of the window: the
-    *last* break that fits is the natural choice, yet a lone early one (the header line above one
-    long paragraph) would otherwise send a message holding nothing but the header. Without a break
-    in that half the latest line break anywhere is taken, and a single line longer than the whole
-    window is cut hard. The index points *at* the separator, which the caller then drops.
+    The *last* paragraph break that fits wins, wherever it is in the window, so a paragraph (a
+    person's block) that fits in the next message is never split across two. The one it skips is
+    a break right under the first line: that would send the header line alone. Without such a
+    break the last line break in the second half of the window is taken - an early one would send
+    a near-empty message - then the last line break anywhere, and a single line longer than the
+    whole window is cut hard. The index points *at* the separator, which the caller then drops.
     """
-    for sep in ("\n\n", "\n"):
-        # `+ len(sep)`: the separator itself may end past the limit, it is not sent
-        cut = text.rfind(sep, limit // 2, limit + len(sep))
-        if cut > 0:
-            return cut
+    first_end = text.find("\n")
+    if first_end < 0:
+        return limit  # one line: nothing to cut at but the limit
+    # where the text after the first line begins: a paragraph break must come after that
+    body = len(text) - len(text[first_end:].lstrip())
+    # `+ len(sep)` in the ends below: the separator itself may end past the limit, it is not sent
+    cut = text.rfind("\n\n", body, limit + 2)
+    if cut > 0:
+        return cut
+    cut = text.rfind("\n", limit // 2, limit + 1)
+    if cut > 0:
+        return cut
     cut = text.rfind("\n", 0, limit + 1)
     return cut if cut > 0 else limit
 
