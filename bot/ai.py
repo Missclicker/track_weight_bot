@@ -408,7 +408,9 @@ _SIMPLIFIED_MODE = (
     "those comparisons for them (protein_g_avg_per_day, and protein_g_per_kg_avg when it is not "
     "null, may still be given as plain numbers) and add at most one short hint that sending "
     'their own birth year, sex and height, for example "/профіль 1981 ч 180", turns on a '
-    "personalised protein norm and energy estimate.\n"
+    "personalised protein norm and energy estimate. A person with an age but a null bmr_kcal "
+    "(sex or height missing) keeps the protein comparison and gets the same single hint for the "
+    "energy estimate.\n"
 )
 
 # The model is told the rule so it can explain the number, but the number itself is the bot's:
@@ -438,8 +440,10 @@ _DATA_NOTES = (
     "Field notes: `energy_share_pct` is each part's share, in %, of 4 kcal per g of protein + "
     "9 per g of fat + 4 per g of carbs + alcohol_kcal. `days` has one entry per logged food day "
     "(`entries` is the number of food entries that day). `late_meals` counts entries logged at "
-    "or after 21:00 local time. `maintenance_kcal_est` is a rough (±15-20%) estimate: "
-    "1.2 x bmr_kcal plus the average daily sport kcal. `previous_week` covers the 7 days before "
+    "or after 21:00 local time (entries filed under an earlier day are not counted). "
+    "`maintenance_kcal_est` is a rough (±15-20%) estimate: 1.2 x bmr_kcal plus sport_kcal / 7 - "
+    "the week's sport spread over all 7 days, unlike the per-logged-day averages. "
+    "`previous_week` covers the 7 days before "
     "week_start (previous_week_start..previous_week_end) with the same definitions; its "
     "protein_g_per_kg_avg uses this week's reference weight. null means unknown or not computable."
 )
