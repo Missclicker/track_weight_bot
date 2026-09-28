@@ -6,6 +6,7 @@ from bot.parsing import (
     DELETE_PHRASES,
     DELETE_WORDS,
     FOOD_CANCEL_PHRASES,
+    ProfileUpdate,
     WaterSchedule,
     is_delete_request,
     is_food_cancel_request,
@@ -13,6 +14,8 @@ from bot.parsing import (
     is_water_due,
     parse_correction,
     parse_kcal_target,
+    parse_profile,
+    parse_sex,
     parse_water_schedule,
     parse_weight,
     strip_yesterday,
@@ -251,6 +254,118 @@ def test_target_clear_words(text: str) -> None:
 @pytest.mark.parametrize("text", [None, "", "2000", "стоп пити", "стопкран"])
 def test_target_clear_words_reject(text: str | None) -> None:
     assert not is_target_clear_request(text)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["m", "M", "male", "Man", "ч", "Ч.", "чол", "чол.", "чоловік", "Чоловіча", " ч ", "ч!"],
+)
+def test_parse_sex_male(value: str) -> None:
+    assert parse_sex(value) == "m"
+
+
+@pytest.mark.parametrize(
+    "value", ["f", "F", "female", "Woman", "ж", "Ж.", "жін", "жін.", "жінка", "Жіноча", " ж "]
+)
+def test_parse_sex_female(value: str) -> None:
+    assert parse_sex(value) == "f"
+
+
+@pytest.mark.parametrize(
+    "value", [None, "", "   ", ".", "x", "чоловіки", "жінки", "мж", "m f", "1", 1, 0.5]
+)
+def test_parse_sex_unknown(value: object) -> None:
+    assert parse_sex(value) is None
+
+
+YEAR = 2026  # the "current year" every profile case below is parsed against
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("1981 ч 180", ProfileUpdate(birth_year=1981, sex="m", height_cm=180)),
+        ("180 ч 1981", ProfileUpdate(birth_year=1981, sex="m", height_cm=180)),  # any order
+        ("ж 165 1990", ProfileUpdate(birth_year=1990, sex="f", height_cm=165)),
+        ("Чоловік", ProfileUpdate(sex="m")),
+        ("female", ProfileUpdate(sex="f")),
+        ("1981", ProfileUpdate(birth_year=1981)),
+        ("1926", ProfileUpdate(birth_year=1926)),  # 100 years old: the oldest year taken
+        ("2012", ProfileUpdate(birth_year=2012)),  # 14: the youngest
+        # a bare age is what people type; it becomes a year (±1, the reply shows which)
+        ("45", ProfileUpdate(birth_year=1981)),
+        ("14", ProfileUpdate(birth_year=2012)),
+        ("100", ProfileUpdate(birth_year=1926)),
+        ("45 жінка 165", ProfileUpdate(birth_year=1981, sex="f", height_cm=165)),
+        ("120", ProfileUpdate(height_cm=120)),
+        ("230", ProfileUpdate(height_cm=230)),
+        ("180см", ProfileUpdate(height_cm=180)),
+        ("180 см", ProfileUpdate(height_cm=180)),
+        ("180cm", ProfileUpdate(height_cm=180)),
+        ("180,5", ProfileUpdate(height_cm=180.5)),  # a decimal comma is not a separator ...
+        ("180.5 см", ProfileUpdate(height_cm=180.5)),
+        ("180,5см", ProfileUpdate(height_cm=180.5)),
+        ("1981, ч, 180", ProfileUpdate(birth_year=1981, sex="m", height_cm=180)),
+        ("1981,180", ProfileUpdate(birth_year=1981, height_cm=180)),  # ... but this comma is
+        ("1981;ж;170", ProfileUpdate(birth_year=1981, sex="f", height_cm=170)),
+        ("1981 р.", ProfileUpdate(birth_year=1981)),
+        ("вік 45 років", ProfileUpdate(birth_year=1981)),
+        (
+            "Рік народження 1981, стать чоловіча, зріст 180 см.",
+            ProfileUpdate(birth_year=1981, sex="m", height_cm=180),
+        ),
+        (
+            "born 1981 sex male height 180 cm",
+            ProfileUpdate(birth_year=1981, sex="m", height_cm=180),
+        ),
+        ("  45   ж!  ", ProfileUpdate(birth_year=1981, sex="f")),
+    ],
+)
+def test_parse_profile_accepts(text: str, expected: ProfileUpdate) -> None:
+    assert parse_profile(text, YEAR) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,
+        "",
+        "   ",
+        ",;",
+        "рік зріст см",  # only filler words: nothing to store
+        "абв",
+        "1981 ч 180 кг",  # one unknown token spoils the whole message ...
+        "1981 x 180",
+        "1981-ч-180",
+        "мені 45",
+        "45 1981",  # ... and so does a field given twice
+        "ч жінка",
+        "180 175",
+        "180 180см",
+        "1925",  # a year outside the age range
+        "2013",
+        "13",  # too young ...
+        "101",  # ... between the age and the height ranges
+        "119",
+        "231",  # too tall
+        "45.5",  # an age is a whole number
+        "45см",  # a unit makes it a height, and 45 cm is not one
+        "1981.5",
+        "0",
+        "-45",
+        "12345",
+    ],
+)
+def test_parse_profile_rejects(text: str | None) -> None:
+    assert parse_profile(text, YEAR) is None
+
+
+def test_parse_profile_ranges_follow_the_current_year() -> None:
+    assert parse_profile("45", 2030) == ProfileUpdate(birth_year=1985)
+    assert parse_profile("2016", 2030) == ProfileUpdate(birth_year=2016)
+    assert parse_profile("2016", YEAR) is None  # 10 years old today
+    assert parse_profile("1926", YEAR) == ProfileUpdate(birth_year=1926)
+    assert parse_profile("1926", 2030) is None  # 104 years old by then
 
 
 @pytest.mark.parametrize("word", sorted(DELETE_WORDS | DELETE_PHRASES))

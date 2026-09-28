@@ -738,6 +738,52 @@ async def test_target_command_sets_shows_and_clears(harness, repo: FakeRepo, set
     assert "ціль" not in session.sent[-1]["text"]
 
 
+async def test_profile_command_sets_shows_changes_and_clears(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, session, _ = harness
+
+    async def profile() -> tuple[int | None, str | None, float | None]:
+        me = await repo.get_user(ME, CHAT_ID)
+        assert me is not None
+        return me.birth_year, me.sex, me.height_cm
+
+    await dp.feed_update(bot, _update("/профіль"))
+    assert session.sent[-1]["text"] == i18n.PROFILE_NONE  # auto-registered, nothing set yet
+    me = await repo.get_user(ME, CHAT_ID)
+    assert me is not None
+    year = user_now(me, settings).year
+
+    await dp.feed_update(bot, _update("/profile 1981 ч 180", message_id=2))
+    assert await profile() == (1981, "m", 180)
+    stored = f"рік народження 1981 ({year - 1981} р.), стать чоловіча, зріст 180 см"
+    assert session.sent[-1]["text"] == i18n.PROFILE_SET.format(profile=stored)
+
+    await dp.feed_update(bot, _update("/профіль", message_id=3))
+    assert session.sent[-1]["text"] == i18n.PROFILE_CURRENT.format(profile=stored)
+
+    # an age alone moves the birth year and keeps what the message did not mention
+    await dp.feed_update(bot, _update("/profile 45", message_id=4))
+    assert await profile() == (year - 45, "m", 180)
+    changed = f"рік народження {year - 45} (45 р.), стать чоловіча, зріст 180 см"
+    assert session.sent[-1]["text"] == i18n.PROFILE_SET.format(profile=changed)
+
+    # a message that does not parse stores nothing - not even the part of it that would
+    await dp.feed_update(bot, _update("/profile абв", message_id=5))
+    usage = session.sent[-1]["text"]
+    assert usage.startswith("Профіль для тижневого звіту")
+    assert f"від {year - 100} до {year - 14}" in usage and "від 120 до 230 см" in usage
+    await dp.feed_update(bot, _update("/profil 1990 абв", message_id=6))
+    assert session.sent[-1]["text"] == usage
+    assert await profile() == (year - 45, "m", 180)
+
+    await dp.feed_update(bot, _update("/profile стоп", message_id=7))
+    assert session.sent[-1]["text"] == i18n.PROFILE_CLEARED
+    assert await profile() == (None, None, None)
+    await dp.feed_update(bot, _update("/профіль", message_id=8))
+    assert session.sent[-1]["text"] == i18n.PROFILE_NONE
+
+
 async def test_reply_videly_deletes_the_food_row(harness, repo: FakeRepo, settings: Settings):
     dp, bot, session, ai = harness
     me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій", daily_kcal_target=2000)

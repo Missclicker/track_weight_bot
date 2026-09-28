@@ -346,6 +346,77 @@ async def test_set_daily_kcal_target_writes_only_that_cell(repo: SheetsRepo) -> 
     assert await repo.set_daily_kcal_target(2, -100, 2000) is False  # unknown user
 
 
+async def test_set_profile_writes_its_three_cells_on_every_row_of_the_user(repo: SheetsRepo):
+    # the same person in a group and in a DM, plus somebody else in the group
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A", tz="Europe/Kyiv"))
+    await repo.upsert_user(User(user_id=1, chat_id=1, name="A", tz="Europe/Warsaw"))
+    await repo.upsert_user(User(user_id=2, chat_id=-100, name="B", birth_year=1990, sex="f"))
+    sheet = ws(repo, "users")
+    sheet.rows[1][HEADERS["users"].index("daily_kcal_target")] = "2000"  # hand-edited, per chat
+    sheet.rows[2][HEADERS["users"].index("target_kg")] = "80"
+    before = [list(row) for row in sheet.rows]
+
+    assert await repo.set_profile(1, 1981, "m", 180) == 2
+    profile = [HEADERS["users"].index(c) for c in ("birth_year", "sex", "height_cm")]
+    for row_no in (1, 2):
+        assert [sheet.rows[row_no][c] for c in profile] == ["1981", "m", "180"]
+        others = [i for i in range(len(HEADERS["users"])) if i not in profile]
+        assert [sheet.rows[row_no][i] for i in others] == [before[row_no][i] for i in others]
+    assert sheet.rows[3] == before[3]  # the other user's row is not touched at all
+
+    group, dm = await repo.get_user(1, -100), await repo.get_user(1, 1)  # the cache was dropped
+    assert group is not None and dm is not None
+    assert (group.birth_year, group.sex, group.height_cm) == (1981, "m", 180)
+    assert (dm.birth_year, dm.sex, dm.height_cm) == (1981, "m", 180)
+    assert (group.daily_kcal_target, dm.tz) == (2000, "Europe/Warsaw")
+
+    assert await repo.set_profile(1, None, None, None) == 2  # None clears the cell
+    assert [sheet.rows[1][c] for c in profile] == ["", "", ""]
+    cleared = await repo.get_user(1, 1)
+    assert cleared is not None
+    assert (cleared.birth_year, cleared.sex, cleared.height_cm) == (None, None, None)
+
+    assert await repo.set_profile(3, 1981, "m", 180) == 0  # unknown user
+    assert len(sheet.rows) == 4
+
+
+async def test_upsert_user_keeps_a_hand_edited_profile(repo: SheetsRepo):
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A", tz="Europe/Kyiv"))
+    sheet = ws(repo, "users")
+    sheet.rows[1][HEADERS["users"].index("birth_year")] = "1981"
+    sheet.rows[1][HEADERS["users"].index("sex")] = "Жінка"  # any spelling parse_sex takes
+    sheet.rows[1][HEADERS["users"].index("height_cm")] = "165,5"
+
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A renamed"))
+    user = await repo.get_user(1, -100)
+    assert user is not None and user.name == "A renamed"
+    assert (user.birth_year, user.sex, user.height_cm) == (1981, "f", 165.5)
+    assert sheet.rows[1][HEADERS["users"].index("sex")] == "f"  # rewritten in canonical form
+
+
+def test_user_profile_round_trips_and_a_legacy_row_still_loads() -> None:
+    user = User(user_id=1, chat_id=-100, name="A", height_cm=180, birth_year=1981, sex="m")
+    row = [str(v) for v in user.to_row()]  # the sheet hands every cell back as a string
+    assert row[-2:] == ["1981", "m"]
+    back = User.from_record(dict(zip(HEADERS["users"], row, strict=True)))
+    assert (back.birth_year, back.sex, back.height_cm) == (1981, "m", 180)
+
+    # a row written before the two columns existed: ten cells, nothing after daily_kcal_target
+    legacy = ["1", "-100", "A", "", "Europe/Kyiv", "TRUE", "", "180", "80", "2000"]
+    old = User.from_record(dict(zip(HEADERS["users"], legacy, strict=False)))
+    assert (old.birth_year, old.sex) == (None, None)
+    assert (old.height_cm, old.daily_kcal_target) == (180, 2000)
+
+
+@pytest.mark.parametrize(
+    ("cell", "expected"),
+    [("1981", 1981), ("1981.0", 1981), ("81", None), ("1981.5", None), ("3000", None), ("", None)],
+)
+def test_user_birth_year_takes_only_a_plausible_whole_year(cell: str, expected: int | None):
+    user = User.from_record({"user_id": "1", "chat_id": "-100", "birth_year": cell})
+    assert user.birth_year == expected
+
+
 def test_num_or_none_rejects_nan_and_inf() -> None:
     from bot.sheets import num_or_none
 
