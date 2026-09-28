@@ -117,6 +117,8 @@ def test_the_role_forbids_invented_numbers_but_not_targets() -> None:
     assert "Report only the numbers that are in the data" in role
     assert "never estimate or invent a missing one" in role
     assert "Recommendations may still set concrete targets" in role
+    # ... but not in place of a value the bot deliberately left null (no age -> no protein norm)
+    assert "never a stand-in for a null one" in role
     assert "the difference between two numbers you were given" in role
 
 

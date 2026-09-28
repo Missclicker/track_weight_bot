@@ -272,6 +272,19 @@ def test_a_block_that_fits_the_next_message_is_not_split(header: str) -> None:
     assert chunks == [f"{header}{block_a}", block_b]
 
 
+@pytest.mark.parametrize("above", ["ШІ недоступний", "короткий рядок"])
+def test_an_early_break_before_a_block_too_long_anyway_is_not_taken(above: str) -> None:
+    """The numbers-only fallback shape: a two-line header over one block longer than a message.
+    That block is cut regardless, so the early paragraph break would only send the header."""
+    body = "\n".join(f"{i:02d}" + "ц" * 97 for i in range(80))  # 80 lines of 99 characters
+    text = f"Тижневий звіт\n{above}\n\n{body}"
+    chunks = split_message(text)
+    assert chunks[0].startswith(f"Тижневий звіт\n{above}\n\n00")
+    assert len(chunks[0]) > 3000
+    assert all(len(chunk) <= 4000 for chunk in chunks)
+    assert _content("".join(chunks)) == _content(text)
+
+
 def test_a_lone_early_break_does_not_leave_the_header_alone() -> None:
     """A header line above one long paragraph: the cut goes deep into the paragraph instead."""
     lines = ["рядок " + str(i) * 20 for i in range(6)]  # 26 characters each
