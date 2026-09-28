@@ -5,7 +5,8 @@ and a scripted stand-in for the Gemini SDK call.
 from __future__ import annotations
 
 import functools
-from datetime import date, datetime
+import math
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -14,7 +15,7 @@ from google.genai import errors as genai_errors
 from bot import ai
 from bot.ai import FoodEstimate
 from bot.config import Settings
-from bot.sheets import HEADERS, User, WaterSubscription
+from bot.sheets import HEADERS, User, WaterSubscription, _parse_ts, num
 
 
 class FakeRepo:
@@ -151,6 +152,24 @@ class FakeRepo:
     async def add_report(self, week_start: date, chat_id: int, text: str, when: datetime) -> None:
         self._append("reports", [when.isoformat(), week_start.isoformat(), chat_id, text])
 
+    async def get_previous_report(self, chat_id: int, week_start: date) -> str | None:
+        # same window, scoping and ordering as `SheetsRepo.get_previous_report`
+        lo, hi = week_start - timedelta(days=13), week_start - timedelta(days=7)
+        picked: list[tuple[datetime | None, dict[str, Any]]] = []
+        for row in self.rows["reports"]:
+            if int(num(row["chat_id"])) != chat_id:
+                continue
+            try:
+                start = date.fromisoformat(str(row["week_start"]))
+            except ValueError:
+                continue
+            if lo <= start <= hi:
+                picked.append((_parse_ts(row["ts"]), row))
+        if not picked:
+            return None
+        picked.sort(key=lambda item: item[0].timestamp() if item[0] is not None else -math.inf)
+        return str(picked[-1][1]["text"])
+
     def _food_row(self, user_id: int, message_id: int) -> dict[str, Any] | None:
         return next(
             (
@@ -261,12 +280,15 @@ class FakeModels:
         # which model each call went to, so a test can pin the vision/text routing itself
         self.models: list[str] = []
         self.contents: list[Any] = []
+        # the whole `GenerateContentConfig` of each call, e.g. to see its `system_instruction`
+        self.configs: list[Any] = []
 
     async def generate_content(self, *, model: str, contents: Any, config: Any) -> FakeResponse:
         http_options = config.http_options
         self.timeouts.append(None if http_options is None else http_options.timeout)
         self.models.append(model)
         self.contents.append(contents)
+        self.configs.append(config)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome

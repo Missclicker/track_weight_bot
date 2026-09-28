@@ -1,7 +1,9 @@
 """Aggregations over the sheet for `/today`, `/kcal`, the food-reply totals and the weekly report.
 
 Both functions only need the repository interface (`user_rows_between`, `get_active_users`), so
-they are tested against the in-memory `FakeRepo` in `tests/conftest.py`.
+they are tested against the in-memory `FakeRepo` in `tests/conftest.py`. The two pure helpers at
+the end prepare the weekly report's text: last week's advice for the prompt and the split into
+Telegram-sized messages.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, NamedTuple, Protocol
 
+from bot import i18n
 from bot.parsing import ts_time
 from bot.sheets import User, num, num_or_none
 
@@ -130,3 +133,92 @@ async def build_weekly_payload(repo: Repo, chat_id: int, week_start: date) -> di
         "week_end": week_end.isoformat(),
         "users": users_payload,
     }
+
+
+# Telegram refuses a message over 4096 characters, counted in UTF-16 code units. The bot sends no
+# emojis, so its text is almost entirely in the BMP where both counts agree; the margin covers the
+# odd astral character and keeps a message clear of the edge.
+MESSAGE_LIMIT = 4000
+# Only bounds a hand-edited cell: a report the bot stored stays far below it (~1100 characters a
+# person in a group), and it must stay far above that, or the last people of a larger group would
+# lose last week's advice to the cut.
+_MAX_ADVICE_CHARS = 8000
+# What the prompt wraps last week's text in (see `ai._PREVIOUS_REPORT_BLOCK`).
+_BLOCK_MARKERS = ("<<<", ">>>")
+
+
+def previous_advice(text: str | None) -> str | None:
+    """Last week's stored report reduced to what the model should follow up on, or None.
+
+    A numbers-only fallback (`i18n.WEEKLY_AI_FAILED`) and a no-data report (`i18n.WEEKLY_NO_DATA`)
+    carry no advice, so they count as no previous report at all: handing one over would only
+    invite the model to follow up on advice nobody gave. The header line is our own date range,
+    not the model's words, and is dropped; so is every "<<<" and ">>>".
+    """
+    if text is None or not text.strip():
+        return None
+    if i18n.WEEKLY_AI_FAILED in text or i18n.WEEKLY_NO_DATA in text:
+        return None
+    header = i18n.WEEKLY_HEADER.split("{", 1)[0].strip()
+    first, _, rest = text.strip().partition("\n")
+    advice = rest if first.startswith(header) else text
+    # The cell is editable by hand, and a ">>>" inside it would close the prompt's data block early
+    # and let the rest read as instructions. No report needs the markers, so they go - in a loop,
+    # because cutting one out can join its neighbours into another ("<<>>><" -> "<<<") - and before
+    # the cap, so the cap counts only what the model is actually given.
+    while any(marker in advice for marker in _BLOCK_MARKERS):
+        for marker in _BLOCK_MARKERS:
+            advice = advice.replace(marker, "")
+    return advice.strip()[:_MAX_ADVICE_CHARS] or None
+
+
+def _split_point(text: str, limit: int) -> int:
+    """Where to cut `text` so the piece before the cut fits in `limit` characters.
+
+    The *last* paragraph break that fits wins, wherever it is in the window, so a paragraph (a
+    person's block) that fits in the next message is never split across two. The one it skips is
+    a break right under the first line: that would send the header line alone. Without such a
+    break the last line break in the second half of the window is taken - an early one would send
+    a near-empty message - then the last line break anywhere, and a single line longer than the
+    whole window is cut hard. The index points *at* the separator, which the caller then drops.
+    """
+    first_end = text.find("\n")
+    if first_end < 0:
+        return limit  # one line: nothing to cut at but the limit
+    # where the text after the first line begins: a paragraph break must come after that
+    body = len(text) - len(text[first_end:].lstrip())
+    # `+ len(sep)` in the ends below: the separator itself may end past the limit, it is not sent
+    cut = text.rfind("\n\n", body, limit + 2)
+    if cut > 0:
+        return cut
+    cut = text.rfind("\n", limit // 2, limit + 1)
+    if cut > 0:
+        return cut
+    cut = text.rfind("\n", 0, limit + 1)
+    return cut if cut > 0 else limit
+
+
+def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """`text` as Telegram-sized messages, in order, each at most `limit` characters.
+
+    Cuts at paragraph boundaries where possible, then at line breaks, then hard (see
+    `_split_point`). A text that fits is returned as it is. Otherwise the only thing dropped is
+    whitespace at the cuts and at the two ends - the separator plus any blank space around it,
+    which would only open or close a message with empty lines - so no content is lost or sent
+    twice, and no piece is empty or whitespace-only (Telegram rejects an empty message).
+    """
+    if limit < 1:
+        raise ValueError(f"limit must be positive, got {limit}")
+    if len(text) <= limit:
+        return [text] if text.strip() else []
+    chunks: list[str] = []
+    rest = text.strip()
+    while len(rest) > limit:
+        cut = _split_point(rest, limit)
+        # `rest` never starts with whitespace, so the piece is never blank; and every cut is > 0,
+        # so the loop always makes progress
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if rest:
+        chunks.append(rest)
+    return chunks

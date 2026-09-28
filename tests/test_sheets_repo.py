@@ -6,7 +6,7 @@ row matching by string cells, upsert dedupe, ownership-scoped corrections, datet
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -490,3 +490,76 @@ def test_num_or_none_rejects_nan_and_inf() -> None:
     assert num_or_none("inf") is None
     assert num_or_none("2000") == 2000
     assert num_or_none("") is None
+
+
+# -- get_previous_report -------------------------------------------------------------------------
+
+REPORT_WEEK = date(2026, 9, 7)  # the window being reported on starts here
+
+
+def _report_row(ts: str, week_start: str, chat_id: str, text: str) -> list[str]:
+    """A `reports` row as the sheet holds it: every cell a string, in header order."""
+    row = {"ts": ts, "week_start": week_start, "chat_id": chat_id, "text": text}
+    return [row[h] for h in HEADERS["reports"]]
+
+
+@pytest.mark.parametrize(
+    ("days_before", "found"),
+    [
+        (14, False),  # two windows back: too stale to follow up on
+        (13, True),  # the earliest window that still counts
+        (7, True),  # the previous Monday run
+        (6, False),  # overlaps the window being reported on
+        (3, False),  # a mid-week /week
+        (0, False),  # this very window
+    ],
+)
+async def test_get_previous_report_window(repo: SheetsRepo, days_before: int, found: bool) -> None:
+    start = REPORT_WEEK - timedelta(days=days_before)
+    when = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
+    await repo.add_report(start, -100, "порада", when)
+
+    expected = "порада" if found else None
+    assert await repo.get_previous_report(-100, REPORT_WEEK) == expected
+
+
+async def test_get_previous_report_is_scoped_to_the_chat(repo: SheetsRepo) -> None:
+    last = REPORT_WEEK - timedelta(days=7)
+    when = datetime(2026, 9, 7, 9, 0, tzinfo=UTC)
+    await repo.add_report(last, -200, "чужа порада", when)
+    assert await repo.get_previous_report(-100, REPORT_WEEK) is None
+
+    await repo.add_report(last, -100, "наша порада", when)
+    assert await repo.get_previous_report(-100, REPORT_WEEK) == "наша порада"
+    assert await repo.get_previous_report(-200, REPORT_WEEK) == "чужа порада"
+
+
+async def test_get_previous_report_latest_ts_wins(repo: SheetsRepo) -> None:
+    """Compared as instants, not as strings, and a ts that does not parse always loses."""
+    sheet = ws(repo, "reports")
+    # 07:30 UTC is later than 09:00 at +03:00 (06:00 UTC), although it sorts first as a string
+    sheet.append_row(
+        _report_row("2026-09-07T07:30:00+00:00", "2026-08-31", "-100", "пізніше"), "RAW"
+    )
+    sheet.append_row(
+        _report_row("2026-09-07T09:00:00+03:00", "2026-08-31", "-100", "раніше"), "RAW"
+    )
+    sheet.append_row(_report_row("не дата", "2026-08-30", "-100", "без часу"), "RAW")
+    sheet.append_row(_report_row("", "2026-08-30", "-100", "порожній час"), "RAW")
+
+    assert await repo.get_previous_report(-100, REPORT_WEEK) == "пізніше"
+
+
+async def test_get_previous_report_without_a_usable_ts_still_answers(repo: SheetsRepo) -> None:
+    ws(repo, "reports").append_row(_report_row("", "2026-08-31", "-100", "рукою"), "RAW")
+    assert await repo.get_previous_report(-100, REPORT_WEEK) == "рукою"
+
+
+async def test_get_previous_report_skips_an_unparseable_week_start(repo: SheetsRepo) -> None:
+    sheet = ws(repo, "reports")
+    for week_start in ("", "46265", "31.08.2026", "минулий тиждень"):
+        sheet.append_row(_report_row("2026-09-07T10:00:00+03:00", week_start, "-100", "?"), "RAW")
+    assert await repo.get_previous_report(-100, REPORT_WEEK) is None
+
+    sheet.append_row(_report_row("2026-09-07T09:00:00+03:00", "2026-08-31", "-100", "так"), "RAW")
+    assert await repo.get_previous_report(-100, REPORT_WEEK) == "так"

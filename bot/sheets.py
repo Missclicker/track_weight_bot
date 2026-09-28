@@ -25,7 +25,7 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 import gspread
@@ -903,6 +903,34 @@ class SheetsRepo:
             return None
         _, last = max(mine, key=lambda item: item[0])
         return date.fromisoformat(str(last["date"])), num(last.get("kg"))
+
+    async def get_previous_report(self, chat_id: int, week_start: date) -> str | None:
+        """Text of the report `chat_id` got for the window before the one starting `week_start`.
+
+        "Before" means a stored `week_start` in `[week_start - 13, week_start - 7]`: that window
+        ended before this one began, and at most a week earlier. A mid-week `/week` overlaps the
+        current window, so it is not last week's report - its numbers are partly this week's -
+        and anything older is too stale to follow up on. When several qualify (the Monday run and
+        a `/week` on the Sunday before it) the latest `ts` wins.
+        """
+        rows = await self._run(self._records, "reports")
+        lo, hi = week_start - timedelta(days=13), week_start - timedelta(days=7)
+        picked: list[tuple[datetime | None, dict[str, Any]]] = []
+        for r in rows:
+            if int(num(r.get("chat_id"))) != chat_id:
+                continue
+            try:
+                start = date.fromisoformat(str(r.get("week_start")))
+            except ValueError:
+                continue  # hand-edited or re-formatted by the sheet: not a window we can place
+            if lo <= start <= hi:
+                picked.append((_parse_ts(r.get("ts")), r))
+        if not picked:
+            return None
+        # compared as instants, not strings (offsets differ across DST); a row whose ts does not
+        # parse sorts first, and the stable sort lets the row appended later win a tie
+        picked.sort(key=lambda item: item[0].timestamp() if item[0] is not None else -math.inf)
+        return str(picked[-1][1].get("text", ""))
 
 
 def _parse_ts(value: Any) -> datetime | None:

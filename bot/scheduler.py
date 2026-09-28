@@ -25,7 +25,7 @@ from bot import i18n
 from bot.ai import GeminiClient
 from bot.config import Settings
 from bot.parsing import is_water_due
-from bot.reports import build_weekly_payload
+from bot.reports import build_weekly_payload, previous_advice, split_message
 from bot.sheets import SheetsRepo, User, WaterSubscription
 
 log = logging.getLogger(__name__)
@@ -221,17 +221,43 @@ class Jobs:
             text = f"{header}\n{i18n.WEEKLY_NO_DATA}"
         else:
             try:
+                previous = previous_advice(await self.repo.get_previous_report(chat_id, week_start))
+            except Exception:
+                # Last week's report is optional context for the model: a flaky read here must
+                # never cost the week its report, which is then written without the follow-up.
+                log.warning(
+                    "could not read the previous weekly report of chat %s", chat_id, exc_info=True
+                )
+                previous = None
+            try:
                 # deliberately no `on_retry` notice: this is a background job, nobody is waiting
                 # on it, and a failure already degrades to the numbers-only fallback below
-                body = await self.ai.weekly_report(payload, personal=is_personal_chat(chat_id))
+                body = await self.ai.weekly_report(
+                    payload, personal=is_personal_chat(chat_id), previous_report=previous
+                )
                 text = f"{header}\n\n{body}"
             except Exception:
                 log.exception("Gemini weekly report failed, sending numbers only")
                 stats = "\n".join(i18n.weekly_stats_block(u) for u in payload["users"])
                 text = f"{header}\n{i18n.WEEKLY_AI_FAILED}\n\n{stats}"
-        # parse_mode=None: the AI text is free-form and would trip Telegram's HTML parser
-        await self.bot.send_message(chat_id, text, parse_mode=None)
-        await self.repo.add_report(week_start, chat_id, text, datetime.now(self.settings.tzinfo))
+        # A group report can outgrow one Telegram message, so every text - AI, numbers-only or
+        # no-data - goes out in pieces, in order, and only the first carries the header. It is
+        # still one report, stored once and whole: that is what next week's follow-up reads back.
+        # A chat that got even the first piece has seen the report, so it is stored as soon as one
+        # piece went out, even when a later one fails: otherwise next week's follow-up would find
+        # nothing for advice people did read. The `finally` does not swallow that send error, so
+        # `weekly_reports` still logs the chat as failed. If the first send fails, nobody saw the
+        # report and nothing is stored.
+        sent = False
+        try:
+            for chunk in split_message(text):
+                # parse_mode=None: the AI text is free-form and would trip Telegram's HTML parser
+                await self.bot.send_message(chat_id, chunk, parse_mode=None)
+                sent = True
+        finally:
+            if sent:
+                now = datetime.now(self.settings.tzinfo)
+                await self.repo.add_report(week_start, chat_id, text, now)
         return text
 
 
