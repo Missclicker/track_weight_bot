@@ -324,15 +324,25 @@ def previous_advice(text: str | None) -> str | None:
     return advice.strip()[:_MAX_ADVICE_CHARS] or None
 
 
+def _paragraph_len(text: str, cut: int) -> int:
+    """Length of the paragraph that starts after the separator at `cut`."""
+    rest = text[cut:].lstrip()
+    end = rest.find("\n\n")
+    return len(rest) if end < 0 else end
+
+
 def _split_point(text: str, limit: int) -> int:
     """Where to cut `text` so the piece before the cut fits in `limit` characters.
 
-    The *last* paragraph break that fits wins, wherever it is in the window, so a paragraph (a
-    person's block) that fits in the next message is never split across two. The one it skips is
-    a break right under the first line: that would send the header line alone. Without such a
-    break the last line break in the second half of the window is taken - an early one would send
-    a near-empty message - then the last line break anywhere, and a single line longer than the
-    whole window is cut hard. The index points *at* the separator, which the caller then drops.
+    The *last* paragraph break that fits wins, so a paragraph (a person's block) that fits in the
+    next message is never split across two. It is skipped when it sits right under the first line,
+    which would send the header line alone, and when it is early in the window while the paragraph
+    after it does not fit in one message either: that block gets cut anyway, so the break would
+    only buy a near-empty message (the numbers-only fallback - one long block under a two-line
+    header - is the case). Without a usable paragraph break the last line break in the second
+    half of the window is taken - an early one would send a near-empty message for the same
+    reason - then the last line break anywhere, and a single line longer than the whole window is
+    cut hard. The index points *at* the separator, which the caller then drops.
     """
     first_end = text.find("\n")
     if first_end < 0:
@@ -341,7 +351,7 @@ def _split_point(text: str, limit: int) -> int:
     body = len(text) - len(text[first_end:].lstrip())
     # `+ len(sep)` in the ends below: the separator itself may end past the limit, it is not sent
     cut = text.rfind("\n\n", body, limit + 2)
-    if cut > 0:
+    if cut > 0 and (cut >= limit // 2 or _paragraph_len(text, cut) <= limit):
         return cut
     cut = text.rfind("\n", limit // 2, limit + 1)
     if cut > 0:
