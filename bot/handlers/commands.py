@@ -223,6 +223,10 @@ async def cmd_profile(
     message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings
 ) -> None:
     user = await ensure_user(message, repo, settings)
+    # Read back rather than trust `ensure_user`: on first contact it returns the blank row it just
+    # built, while the stored one already carries the profile set in the person's other chats (see
+    # `_all_users_sync`) - merging those blanks would wipe it on every row.
+    user = await repo.get_user(user.user_id, user.chat_id) or user
     current_year = user_now(user, settings).year
     if not command.args:
         profile = i18n.fmt_profile(user.birth_year, user.sex, user.height_cm, current_year)
