@@ -26,8 +26,9 @@ from bot.ai import FoodEstimate, ModelOverloaded, QuotaExceeded, RetryNotice, Sp
 from bot.config import Settings
 from bot.handlers import build_router
 from bot.scheduler import user_now
-from bot.sheets import User
+from bot.sheets import HEADERS, SheetsRepo, User
 from tests.conftest import FakeRepo, client_with, server_error
+from tests.test_sheets_repo import FakeWorksheet
 
 BOT_ID = 123  # derived from the token "123:abc"
 CHAT_ID = -100
@@ -782,6 +783,67 @@ async def test_profile_command_sets_shows_changes_and_clears(
     assert await profile() == (None, None, None)
     await dp.feed_update(bot, _update("/профіль", message_id=8))
     assert session.sent[-1]["text"] == i18n.PROFILE_NONE
+
+
+def _real_repo_dispatcher(settings: Settings) -> tuple[Dispatcher, Bot, MockSession, SheetsRepo]:
+    """The Dispatcher over a real `SheetsRepo`, serving the group and the DM of `ME`.
+
+    `FakeRepo` keeps one row per user, so a person with a group row *and* a DM row - the case
+    `/profile` must not lose data in - only exists on the real repo over in-memory worksheets.
+    """
+    settings = settings.model_copy(update={"allowed_chat_ids": {CHAT_ID, ME}})
+    repo = SheetsRepo(settings)
+    repo._worksheets = {tab: FakeWorksheet(h) for tab, h in HEADERS.items()}  # type: ignore[misc]
+    session = MockSession()
+    bot = Bot("123:abc", session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot._me = TgUser(id=BOT_ID, is_bot=True, first_name="Bot", username="bot")
+    dp = Dispatcher(repo=repo, ai=FakeAI(), settings=settings, jobs=FakeJobs())
+    dp.include_router(build_router())
+    return dp, bot, session, repo
+
+
+def _profile_cells(repo: SheetsRepo) -> list[tuple[str, str, float | None]]:
+    """The raw `(birth_year, sex, height_cm)` cells of every `users` row, in sheet order."""
+    rows = repo._worksheets["users"].rows[1:]  # type: ignore[attr-defined]
+    at = {col: HEADERS["users"].index(col) for col in ("birth_year", "sex", "height_cm")}
+    return [
+        (
+            r[at["birth_year"]],
+            r[at["sex"]],
+            float(r[at["height_cm"]]) if r[at["height_cm"]] else None,
+        )
+        for r in rows
+    ]
+
+
+@pytest.mark.parametrize("first_dm_message", ["/profile 45", "/профіль"])
+async def test_a_first_profile_message_in_the_dm_keeps_the_group_profile(
+    settings: Settings, first_dm_message: str
+) -> None:
+    """On first contact `ensure_user` hands back the blank row it has just built; `/profile` must
+    read the stored one back, which already carries the profile set in the group, or merging those
+    blanks writes them over every row of the person."""
+    dp, bot, session, repo = _real_repo_dispatcher(settings)
+    await dp.feed_update(bot, _update("/profile 1981 ч 180"))
+    assert _profile_cells(repo) == [("1981", "m", 180)]
+
+    # the person's very first message in the DM: there is no DM row yet
+    await dp.feed_update(
+        bot, _update(first_dm_message, chat_id=ME, chat_type="private", message_id=2)
+    )
+
+    me = await repo.get_user(ME, ME)
+    assert me is not None
+    year = user_now(me, settings).year
+    if first_dm_message == "/profile 45":
+        # only the birth year moved, on both rows; sex and height survived
+        assert _profile_cells(repo) == [(str(year - 45), "m", 180)] * 2
+        profile = i18n.fmt_profile(year - 45, "m", 180, year)
+        assert session.sent[-1]["text"] == i18n.PROFILE_SET.format(profile=profile)
+    else:
+        # the DM shows the profile set in the group instead of "no profile"
+        profile = i18n.fmt_profile(1981, "m", 180, year)
+        assert session.sent[-1]["text"] == i18n.PROFILE_CURRENT.format(profile=profile)
 
 
 async def test_reply_videly_deletes_the_food_row(harness, repo: FakeRepo, settings: Settings):

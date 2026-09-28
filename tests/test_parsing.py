@@ -315,6 +315,9 @@ YEAR = 2026  # the "current year" every profile case below is parsed against
         ("1981 р.н.", ProfileUpdate(birth_year=1981)),
         ("вік 45 років", ProfileUpdate(birth_year=1981)),
         ("зріст: 180", ProfileUpdate(height_cm=180)),  # a label may end with a colon
+        ("зріст:180", ProfileUpdate(height_cm=180)),  # ... or be glued to its value
+        ("стать:ж", ProfileUpdate(sex="f")),
+        ("1981 р. н.", ProfileUpdate(birth_year=1981)),
         ("вік: 45", ProfileUpdate(birth_year=1981)),
         ("стать: ж", ProfileUpdate(sex="f")),
         (
