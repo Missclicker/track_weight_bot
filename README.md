@@ -36,23 +36,23 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    ```t
    start - Зареєструватися і показати довідку
    w - Записати вагу: /w 84.3
-   vaga - Те саме, що /w
    food - Записати їжу текстом: /food борщ і два хліба (без тексту - запитаю)
-   yizha - Те саме, що /food
    sport - Записати активність: /sport біг 5 км 30 хв (без тексту - запитаю)
    today - Мій підсумок за сьогодні
-   sohodni - Те саме, що /today
    kcal - Що я з'їв сьогодні і скільки це ккал
-   kalorii - Те саме, що /kcal
    target - Денна ціль ккал (необов'язково): /target 2000, прибрати: /target стоп
-   tsil - Те саме, що /target
    profile - Профіль для тижневого звіту: /profile 1981 ч 180
-   profil - Те саме, що /profile
    week - Звіт за 7 останніх повних днів
-   tyzhden - Те саме, що /week
    water - Нагадування пити воду: /water будні з 9 до 18 кожні 30 хв
-   voda - Те саме, що /water
    help - Довідка
+   vaga - Те саме, що /w
+   yizha - Те саме, що /food
+   sohodni - Те саме, що /today
+   kalorii - Те саме, що /kcal
+   tsil - Те саме, що /target
+   profil - Те саме, що /profile
+   tyzhden - Те саме, що /week
+   voda - Те саме, що /water
    dovidka - Те саме, що /help
    ```
 
@@ -86,14 +86,14 @@ By default a bot in a group only sees commands, @mentions and replies to itself.
 
 Sheet layout (for reference / manual edits):
 
-| tab       | columns                                                                                                                                             |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `users`   | `user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg, daily_kcal_target, birth_year, sex`                                 |
-| `weight`  | `ts, date, user_id, name, kg, source`                                                                                                               |
+| tab       | columns                                                                                                                                                      |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `users`   | `user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg, daily_kcal_target, birth_year, sex`                                          |
+| `weight`  | `ts, date, user_id, name, kg, source`                                                                                                                        |
 | `food`    | `ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g, veg_share, confidence, source, message_id, corrected, photo_file_id, portion` |
-| `sport`   | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source, message_id`                                                                 |
-| `reports` | `ts, week_start, chat_id, text`                                                                                                                     |
-| `water`   | `user_id, chat_id, name, tz, days, start, end, every_min, active, updated_at`                                                                       |
+| `sport`   | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source, message_id`                                                                          |
+| `reports` | `ts, week_start, chat_id, text`                                                                                                                              |
+| `water`   | `user_id, chat_id, name, tz, days, start, end, every_min, active, updated_at`                                                                                |
 
 ### 5. Gemini API key
 
@@ -256,25 +256,25 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 
 ## How the bot decides what a message is
 
-| message                                                                                                            | action                                                      |
-| ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| photo (optionally with caption)                                                                                    | Gemini vision → kcal estimate with the portion it assumed, e.g. `≈ 520 ккал - картопля з м'ясом, 400 г` (+ today's running total) → `food` |
-| bare number in `[WEIGHT_MIN, WEIGHT_MAX]`, e.g. `84.3` / `84,3`                                                    | weight → `weight`                                           |
-| reply to the bot's morning ping with a number                                                                      | weight (`source` = `ping`)                                  |
-| reply to any other bot message with a number — a sport confirmation, `/kcal`, the weekly report … | weight (`source` = `reply`); a number replying to another **person** is ignored |
-| reply to the bot's food estimate with a number                                                                     | sets kcal of that estimate — `84` stays 84 kcal, because the weight range overlaps plausible portions |
-| reply to the bot's food estimate with a number that says kilograms: `84.3`, `84 кг`, `вага 84`     | weight (`source` = `reply`)                                 |
-| reply to the bot's food estimate with text (weight, ingredients, dish name)                                        | Gemini re-estimates it (with the photo) and updates the row |
-| `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/profile`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                     |
-| `/water …` / `/вода …` (in the group or in the DM)                                                                 | water reminder schedule → `water`                           |
-| `/sport біг 5 км 30 хв` (`/спорт …`)                                                                               | Gemini text parse → `sport`                                 |
-| `/їжа вчора млинці зі сметаною` (`/спорт вчора волейбол 2 години`), or "вчора" in a photo caption or a prompt reply | the same record, but dated **yesterday** in the user's timezone (`ts` still says when it was sent); the word is stripped before Gemini sees the text, and the reply names the date |
-| `/food` or `/sport` with no text                                                                                   | the bot asks for it ("Чекаю опис …") and waits for a reply  |
-| reply to that prompt                                                                                               | recorded as food / sport for whoever replied                |
-| reply `видали` (`скасуй`, `прибери`, `delete`, …, optionally padded: `видали цей запис`) to the bot's food estimate or sport confirmation | that row is removed from the sheet. A verb carrying a noun (`прибери хліб`) is a correction instead |
-| reply `не записуй`, `це жарт`, `я випадково`, `помилково` … to the bot's **food** estimate        | the same removal, for the phrases people type instead of an order. Food only: under a sport confirmation they are ignored. A noun still disqualifies (`не записуй хліб` is a correction) |
-| reply `видали` to a `/food` or `/sport` prompt                                                                     | the command is cancelled, nothing is recorded               |
-| anything else                                                                                                      | ignored                                                     |
+| message                                                                                                                                            | action                                                                                                                                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| photo (optionally with caption)                                                                                                                    | Gemini vision → kcal estimate with the portion it assumed, e.g. `≈ 520 ккал - картопля з м'ясом, 400 г` (+ today's running total) → `food`                                               |
+| bare number in `[WEIGHT_MIN, WEIGHT_MAX]`, e.g. `84.3` / `84,3`                                                                                    | weight → `weight`                                                                                                                                                                        |
+| reply to the bot's morning ping with a number                                                                                                      | weight (`source` = `ping`)                                                                                                                                                               |
+| reply to any other bot message with a number — a sport confirmation, `/kcal`, the weekly report …                                                  | weight (`source` = `reply`); a number replying to another **person** is ignored                                                                                                          |
+| reply to the bot's food estimate with a number                                                                                                     | sets kcal of that estimate — `84` stays 84 kcal, because the weight range overlaps plausible portions                                                                                    |
+| reply to the bot's food estimate with a number that says kilograms: `84.3`, `84 кг`, `вага 84`                                                     | weight (`source` = `reply`)                                                                                                                                                              |
+| reply to the bot's food estimate with text (weight, ingredients, dish name)                                                                        | Gemini re-estimates it (with the photo) and updates the row                                                                                                                              |
+| `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/profile`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                                                                                                                                                        |
+| `/water …` / `/вода …` (in the group or in the DM)                                                                                                 | water reminder schedule → `water`                                                                                                                                                        |
+| `/sport біг 5 км 30 хв` (`/спорт …`)                                                                                                               | Gemini text parse → `sport`                                                                                                                                                              |
+| `/їжа вчора млинці зі сметаною` (`/спорт вчора волейбол 2 години`), or "вчора" in a photo caption or a prompt reply                                | the same record, but dated **yesterday** in the user's timezone (`ts` still says when it was sent); the word is stripped before Gemini sees the text, and the reply names the date       |
+| `/food` or `/sport` with no text                                                                                                                   | the bot asks for it ("Чекаю опис …") and waits for a reply                                                                                                                               |
+| reply to that prompt                                                                                                                               | recorded as food / sport for whoever replied                                                                                                                                             |
+| reply `видали` (`скасуй`, `прибери`, `delete`, …, optionally padded: `видали цей запис`) to the bot's food estimate or sport confirmation          | that row is removed from the sheet. A verb carrying a noun (`прибери хліб`) is a correction instead                                                                                      |
+| reply `не записуй`, `це жарт`, `я випадково`, `помилково` … to the bot's **food** estimate                                                         | the same removal, for the phrases people type instead of an order. Food only: under a sport confirmation they are ignored. A noun still disqualifies (`не записуй хліб` is a correction) |
+| reply `видали` to a `/food` or `/sport` prompt                                                                                                     | the command is cancelled, nothing is recorded                                                                                                                                            |
+| anything else                                                                                                                                      | ignored                                                                                                                                                                                  |
 
 Plain chat messages are never scanned for sport keywords — mentioning a run in conversation used to
 log a workout by mistake, so an activity is only recorded through `/sport` or a reply to its prompt.
