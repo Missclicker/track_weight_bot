@@ -24,7 +24,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -429,7 +429,31 @@ class SheetsRepo:
             if rec.get("user_id"):
                 user = User.from_record(rec)
                 by_key[(user.user_id, user.chat_id)] = user
-        users = list(by_key.values())
+        # A person has a row per chat (the group and the DM), but the profile describes the
+        # person, not one membership: a blank profile cell - a DM row registered after the
+        # profile was set, a cell typed into the group row only - is filled from the person's
+        # other rows (the row's own value wins, then the first one in sheet order). Otherwise
+        # that chat answers "no profile", and `/profile 45` sent there merges the blanks and
+        # `set_profile` writes them over the other row. Per-chat columns (`daily_kcal_target`,
+        # `tz`, ...) stay apart.
+        profile_fields = ("birth_year", "sex", "height_cm")
+        known: dict[tuple[int, str], Any] = {}
+        for user in by_key.values():
+            for field in profile_fields:
+                if getattr(user, field) is not None:
+                    known.setdefault((user.user_id, field), getattr(user, field))
+        # copies, filled only once `known` is complete: a filled-in value never counts as own
+        users = [
+            replace(
+                user,
+                **{
+                    field: known.get((user.user_id, field))
+                    for field in profile_fields
+                    if getattr(user, field) is None
+                },
+            )
+            for user in by_key.values()
+        ]
         self._users_cache = (now, users)
         return users
 
@@ -450,7 +474,7 @@ class SheetsRepo:
                 and existing[0] == str(user.user_id)
                 and existing[1] == str(user.chat_id)
             ):
-                # keep manually edited columns (tz, height, targets) unless the caller set them
+                # keep manually edited columns (tz, targets, profile) unless the caller set them
                 merged = User.from_record(dict(zip(HEADERS["users"], existing, strict=False)))
                 merged.chat_id = user.chat_id
                 merged.name = user.name

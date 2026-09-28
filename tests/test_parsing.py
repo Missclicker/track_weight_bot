@@ -307,9 +307,20 @@ YEAR = 2026  # the "current year" every profile case below is parsed against
         ("180,5см", ProfileUpdate(height_cm=180.5)),
         ("1981, ч, 180", ProfileUpdate(birth_year=1981, sex="m", height_cm=180)),
         ("1981,180", ProfileUpdate(birth_year=1981, height_cm=180)),  # ... but this comma is
+        # a decimal comma takes exactly one digit: two after it are a second value, here an age
+        ("180,45", ProfileUpdate(birth_year=1981, height_cm=180)),
+        ("180,5,45", ProfileUpdate(birth_year=1981, height_cm=180.5)),
         ("1981;ж;170", ProfileUpdate(birth_year=1981, sex="f", height_cm=170)),
         ("1981 р.", ProfileUpdate(birth_year=1981)),
+        ("1981 р.н.", ProfileUpdate(birth_year=1981)),
         ("вік 45 років", ProfileUpdate(birth_year=1981)),
+        ("зріст: 180", ProfileUpdate(height_cm=180)),  # a label may end with a colon
+        ("вік: 45", ProfileUpdate(birth_year=1981)),
+        ("стать: ж", ProfileUpdate(sex="f")),
+        (
+            "рік народження: 1981, стать: ч, зріст: 180,5 см",
+            ProfileUpdate(birth_year=1981, sex="m", height_cm=180.5),
+        ),
         (
             "Рік народження 1981, стать чоловіча, зріст 180 см.",
             ProfileUpdate(birth_year=1981, sex="m", height_cm=180),

@@ -117,7 +117,9 @@ Anything unmatched is ignored.
 `daily_kcal_target`, `birth_year`, `sex`, `active` are preserved on upsert. `birth_year` and
 `sex` are trailing columns (see *Trailing columns*); a hand-typed cell counts only when it makes
 sense - a whole year in 1900..2100, a sex word `parse_sex` knows - and is otherwise read as
-unknown.
+unknown. A blank `birth_year`, `sex` or `height_cm` cell on one row is filled on read from the
+person's other rows (`_all_users_sync`; the row's own value wins), so every row of a person
+answers with the same profile and `/profile 45` from the DM merges the group's values, not blanks.
 
 **Dates.** Every timestamp is written in the user's timezone (`users.tz`, fallback
 `DEFAULT_TZ`) and "today" is computed there. The `date` column is the lookup key for all
@@ -238,9 +240,10 @@ self-healing conditions, not bugs to hunt. The polling loop never dies
 because of a handler.
 
 **Trailing columns.** `food.portion` (the portion size the model priced, shown on the `≈` line so
-the user can see what the calories were computed for) and `sport.message_id` (the confirmation a
-delete replies to) are the *last* entries of their `HEADERS` lists: an existing spreadsheet then
-only gains a trailing column instead of having every value shifted right.
+the user can see what the calories were computed for), `sport.message_id` (the confirmation a
+delete replies to) and `users.birth_year` / `users.sex` (the profile for the weekly report) are
+the *last* entries of their `HEADERS` lists: an existing spreadsheet then only gains a trailing
+column instead of having every value shifted right.
 
 **Sheets writes.** Everything is appended with `value_input_option=RAW`: names and dishes can
 never be evaluated as formulas, and the ISO `date`/`ts` strings we filter on are not re-formatted

@@ -138,6 +138,7 @@ _PROFILE_FILLERS = frozenset(
         "вік",
         "років",
         "роки",
+        "р.н",  # "1981 р.н.": the trailing dot is stripped off the token first
         "зріст",
         "height",
         "стать",
@@ -146,10 +147,10 @@ _PROFILE_FILLERS = frozenset(
         "cm",
     }
 )
-# Whitespace, semicolons and commas separate the values - except a comma that is a decimal
-# separator ("180,5"): one between a digit and one or two more digits that end the number.
-# "1981,180" is therefore still two values.
-_PROFILE_SPLIT = re.compile(r"[\s;]+|(?<!\d),|,(?!\d{1,2}(?!\d))")
+# Whitespace, semicolons and commas separate the values - except a decimal comma ("180,5"):
+# one between a digit and exactly one more digit that ends the number, since a height is never
+# typed to more than a millimetre. "180,45" (a height and an age) and "1981,180" are two values.
+_PROFILE_SPLIT = re.compile(r"[\s;]+|(?<!\d),|,(?!\d(?!\d))")
 _PROFILE_NUMBER = re.compile(r"(?P<num>\d+(?P<dec>[.,]\d+)?)(?P<unit>см|cm)?")
 
 
@@ -203,7 +204,7 @@ def parse_profile(text: str | None, current_year: int) -> ProfileUpdate | None:
         return None
     fields: dict[str, Any] = {}
     for raw in _PROFILE_SPLIT.split(text.strip().lower()):
-        token = raw.rstrip(".!")
+        token = raw.rstrip(".!:")  # "зріст: 180", "1981 р.н."
         if not token or token in _PROFILE_FILLERS:
             continue
         sex = parse_sex(token)

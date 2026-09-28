@@ -1002,6 +1002,16 @@ def test_target_suffix_hides_missing_or_broken_targets() -> None:
     assert "(ціль 1800)" in i18n.day_total(100, 1800)
 
 
+def test_fmt_profile_names_only_the_known_fields() -> None:
+    full = i18n.fmt_profile(1981, "m", 180, 2026)
+    assert full == "рік народження 1981 (45 р.), стать чоловіча, зріст 180 см"
+    assert i18n.fmt_profile(None, "f", None, 2026) == "стать жіноча"
+    assert i18n.fmt_profile(None, None, 180.5, 2026) == "зріст 180.5 см"
+    # a hand-typed year in the future would be a negative age: the year alone is shown
+    assert i18n.fmt_profile(2030, None, None, 2026) == "рік народження 2030"
+    assert i18n.fmt_profile(None, None, None, 2026) == ""
+
+
 def test_kcal_today_renders_the_time_of_every_entry() -> None:
     text = i18n.kcal_today("A", "2026-09-17", [("07:54", "сирники", 390), (None, "чай", 20)], None)
     assert text.splitlines()[1:3] == [
