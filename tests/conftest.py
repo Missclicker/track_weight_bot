@@ -7,6 +7,7 @@ from __future__ import annotations
 import functools
 import inspect
 import math
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -334,10 +335,19 @@ def client_with(outcomes: list[Any]) -> tuple[ai.GeminiClient, FakeModels]:
     return client, models
 
 
+@dataclass(frozen=True)
+class GroqAnswer:
+    """A scripted Groq answer with a `finish_reason` other than the default "stop"."""
+
+    content: str | None
+    finish_reason: str = "stop"
+
+
 class FakeCompletions:
     """Answers Groq's `chat.completions.create` from a scripted list and records every request.
 
-    A list item is either an exception (raised) or a string / None (the `message.content`).
+    A list item is an exception (raised), a string / None (the `message.content` of an answer that
+    finished normally) or a `GroqAnswer` (to script the `finish_reason` as well).
     """
 
     def __init__(self, outcomes: list[Any]) -> None:
@@ -354,7 +364,11 @@ class FakeCompletions:
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=outcome))])
+        answer = outcome if isinstance(outcome, GroqAnswer) else GroqAnswer(outcome)
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content=answer.content), finish_reason=answer.finish_reason
+        )
+        return SimpleNamespace(choices=[choice])
 
     @property
     def calls(self) -> int:

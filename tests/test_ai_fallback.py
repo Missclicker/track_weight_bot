@@ -7,6 +7,7 @@ Groq), so nothing goes over the network, and `no_ai_backoff` zeroes the Gemini s
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import logging
 import time
@@ -15,16 +16,39 @@ import groq
 import httpx
 import pytest
 from google.genai import types
+from pydantic import BaseModel, Field
 
 from bot import ai
-from bot.ai import FoodEstimate, ModelOverloaded, QuotaExceeded
+from bot.ai import FoodEstimate, ModelOverloaded, QuotaExceeded, SportParse
 from bot.config import Settings
-from bot.fallback import GroqClient, _has_image, _to_parts
-from tests.conftest import client_error, client_with, client_with_fallback, server_error
+from bot.fallback import GroqClient, _has_image, _to_parts, strict_schema
+from tests.conftest import (
+    GroqAnswer,
+    client_error,
+    client_with,
+    client_with_fallback,
+    server_error,
+)
 
 pytestmark = pytest.mark.usefixtures("no_ai_backoff")
 
-FOOD_JSON = json.dumps({"dish": "борщ", "kcal": 420, "portion": "400 г"}, ensure_ascii=False)
+# A complete answer, the only kind strict mode lets through: every key of `FoodEstimate` is there.
+FOOD_JSON = json.dumps(
+    {
+        "dish": "борщ",
+        "portion": "400 г",
+        "kcal": 420,
+        "alcohol_kcal": 0,
+        "protein_g": 18,
+        "fat_g": 16,
+        "carbs_g": 45,
+        "veg_share": 0.4,
+        "confidence": 0.7,
+        "notes": "",
+        "is_food": True,
+    },
+    ensure_ascii=False,
+)
 
 
 def _groq_down() -> groq.APIConnectionError:
@@ -95,11 +119,11 @@ async def test_the_system_instruction_becomes_the_first_message() -> None:
     assert "response_format" not in groq_calls.requests[0]  # free text, no schema
 
 
-async def test_a_schema_asks_groq_for_non_strict_json_and_is_parsed() -> None:
+async def test_a_schema_asks_groq_for_strict_json_and_is_parsed() -> None:
     client, _, groq_calls = client_with_fallback([client_error(429)], [FOOD_JSON])
     est = await client.estimate_food(None, None, "борщ")
     assert isinstance(est, FoodEstimate)
-    assert (est.dish, est.kcal, est.portion) == ("борщ", 420, "400 г")
+    assert (est.dish, est.kcal, est.portion, est.protein_g) == ("борщ", 420, "400 г", 18)
 
     request = groq_calls.requests[0]
     assert request["model"] == "groq-text"
@@ -107,10 +131,99 @@ async def test_a_schema_asks_groq_for_non_strict_json_and_is_parsed() -> None:
         "type": "json_schema",
         "json_schema": {
             "name": "FoodEstimate",
-            "schema": FoodEstimate.model_json_schema(),
-            "strict": False,
+            "schema": strict_schema(FoodEstimate),
+            "strict": True,
         },
     }
+    assert request["max_completion_tokens"] == 600
+
+
+async def test_free_text_gets_the_larger_output_cap() -> None:
+    client, _, groq_calls = client_with_fallback([client_error(429)], ["звіт"])
+    assert await client.weekly_report({"users": []}) == "звіт"
+    assert groq_calls.requests[0]["max_completion_tokens"] == 4096
+
+
+def _walk(node: object) -> list[dict[str, object]]:
+    """Every dict in a JSON schema tree, the tree itself included."""
+    if isinstance(node, list):
+        return [found for item in node for found in _walk(item)]
+    if isinstance(node, dict):
+        return [node, *(found for value in node.values() for found in _walk(value))]
+    return []
+
+
+def test_strict_schema_requires_every_food_field_and_keeps_the_bounds() -> None:
+    schema = strict_schema(FoodEstimate)
+    properties = schema["properties"]
+    assert schema["required"] == list(FoodEstimate.model_fields)
+    assert schema["additionalProperties"] is False
+    assert "description" not in schema  # the model docstring is not sent
+    for node in _walk(schema):
+        assert "default" not in node
+        assert "title" not in node
+    assert properties["kcal"]["minimum"] == 0
+    assert properties["kcal"]["maximum"] == 10_000
+    assert properties["veg_share"]["maximum"] == 1
+    assert properties["dish"]["description"] == "Short dish name in Ukrainian"
+
+
+def test_strict_schema_keeps_a_nullable_field_and_requires_it() -> None:
+    schema = strict_schema(SportParse)
+    assert schema["required"] == ["activity", "minutes", "distance_km"]
+    assert schema["additionalProperties"] is False
+    assert {"type": "null"} in schema["properties"]["minutes"]["anyOf"]
+    assert {"type": "null"} in schema["properties"]["distance_km"]["anyOf"]
+
+
+class _Inner(BaseModel):
+    grams: float = Field(default=0, ge=0)
+    title: str = ""  # a property named like the keyword it must not be confused with
+
+
+class _Outer(BaseModel):
+    name: str
+    inner: _Inner
+    extras: list[_Inner] = Field(default_factory=list)
+
+
+def test_strict_schema_applies_the_rules_inside_defs() -> None:
+    schema = strict_schema(_Outer)
+    inner = schema["$defs"]["_Inner"]
+    assert inner["required"] == ["grams", "title"]
+    assert inner["additionalProperties"] is False
+    assert "title" in inner["properties"]  # the property survives, only its own "title" goes
+    assert "title" not in inner["properties"]["title"]
+    assert schema["required"] == ["name", "inner", "extras"]
+    for node in _walk(schema):
+        assert "default" not in node
+        if node.get("type") == "object":
+            assert node["additionalProperties"] is False
+
+
+def test_strict_schema_does_not_touch_the_dict_it_is_handed(monkeypatch) -> None:
+    # pydantic builds a fresh dict per call today; hand out one shared dict to prove the copy
+    shared = FoodEstimate.model_json_schema()
+    before = copy.deepcopy(shared)
+    monkeypatch.setattr(FoodEstimate, "model_json_schema", classmethod(lambda cls: shared))
+    strict_schema(FoodEstimate)
+    assert shared == before
+    assert shared["required"] == ["dish", "kcal"]
+
+
+class _WithMapping(BaseModel):
+    counts: dict[str, int]
+
+
+def test_a_free_form_mapping_is_refused_rather_than_sent_non_strict() -> None:
+    with pytest.raises(ValueError, match="free-form mapping"):
+        strict_schema(_WithMapping)
+
+
+@pytest.mark.parametrize("schema", [FoodEstimate, SportParse])
+def test_every_schema_the_bot_sends_converts(schema: type[BaseModel]) -> None:
+    # a field Groq strict mode cannot take would silently turn the fallback off for that call
+    assert strict_schema(schema)["additionalProperties"] is False
 
 
 @pytest.mark.parametrize(
@@ -188,6 +301,51 @@ async def test_invalid_json_from_groq_counts_as_a_failed_fallback() -> None:
     with pytest.raises(QuotaExceeded):
         await client.estimate_food(None, None, "борщ")
     assert groq_calls.calls == 1
+
+
+async def test_valid_json_with_corrupt_keys_is_not_a_meal_of_zeros(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The production answer: a `\\"` closed no key, so `fat_g": 18, ` became one junk key.
+
+    It parses, and pydantic would ignore the junk and default every missing field to 0 - so the
+    completeness check must refuse it and the user get the outage reply instead.
+    """
+    corrupt = '{"dish": "Паста", "kcal": 550, "protein_g": 25, "fat_g\\": 18, ": 50}'
+    assert set(json.loads(corrupt)) == {"dish", "kcal", "protein_g", 'fat_g": 18, '}
+    client, _, groq_calls = client_with_fallback([client_error(429)], [corrupt])
+    with caplog.at_level(logging.WARNING, logger="bot.ai"), pytest.raises(QuotaExceeded):
+        await client.estimate_food(None, None, "паста")
+    assert groq_calls.calls == 1
+    [failure] = [r.getMessage() for r in caplog.records if "fallback failed" in r.getMessage()]
+    # exactly the missing keys ("fat_g" among them: the junk key does not stand in for it)...
+    missing = "portion, alcohol_kcal, fat_g, carbs_g, veg_share, confidence, notes, is_food"
+    assert f"misses {missing}:" in failure
+    # ...and the start of the raw answer, so the operator sees what came back
+    assert '"dish": "Паста", "kcal": 550' in failure
+    # ...with its stray backslash shown once, as it was sent, not doubled by a repr
+    assert '"fat_g\\": 18' in failure
+
+
+async def test_a_non_object_answer_to_a_schema_call_counts_as_a_failed_fallback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, _, _ = client_with_fallback([client_error(429)], ["[]"])
+    with caplog.at_level(logging.WARNING, logger="bot.ai"), pytest.raises(QuotaExceeded):
+        await client.estimate_food(None, None, "борщ")
+    assert any("not a JSON object" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(("content", "schema"), [(FOOD_JSON, FoodEstimate), ("звіт...", None)])
+async def test_an_answer_cut_off_at_the_cap_counts_as_a_failed_fallback(
+    content: str, schema: type[BaseModel] | None
+) -> None:
+    # Even a complete-looking body: `length` means the model wanted to say more.
+    client, _, _ = client_with_fallback(
+        [server_error(503), server_error(503)], [GroqAnswer(content, finish_reason="length")]
+    )
+    with pytest.raises(ModelOverloaded):
+        await client._generate(client.text_model, ["hi"], schema)
 
 
 @pytest.mark.parametrize("content", ["", "   \n", None, "<think>only thoughts</think>"])

@@ -25,7 +25,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
 | `bot/nutrition.py` | Pure numbers for the weekly report, None in -> None out: `age_on`, the age-based `protein_g_per_kg` and the `reference_weight` it multiplies, `bmi`, `bmr_mifflin` (Mifflin-St Jeor), `maintenance_kcal` (sedentary BMR + logged sport) and `energy_shares` (see *Nutrition numbers* below). |
 | `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report` (the only call with a role: `REPORT_SYSTEM_INSTRUCTION` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). `_generate` wraps the Gemini ladder (`_generate_gemini`) and, when a `GroqClient` was passed in as `fallback`, hands the call to Groq on either outage; `check_available` is the photo precheck that knows about it (see *Groq fallback*). |
-| `bot/fallback.py` | `GroqClient`: one Groq chat completion for a Gemini-shaped call - prompt strings and image `Part`s translated into chat content parts, the vision or text model picked by whether an image is present, a non-strict `json_schema` response format for a pydantic schema, reasoning kept out of the answer. Single attempt, no cooldowns (see *Groq fallback*). Not named `groq.py`, which would shadow the SDK. |
+| `bot/fallback.py` | `GroqClient`: one Groq chat completion for a Gemini-shaped call - prompt strings and image `Part`s translated into chat content parts, the vision or text model picked by whether an image is present, a strict `json_schema` response format built from a pydantic schema by `strict_schema` plus a completeness check on the answer, an output cap on every request, reasoning kept out of the answer. Single attempt, no cooldowns (see *Groq fallback*). Not named `groq.py`, which would shadow the SDK. |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
 | `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini: per person the week's totals and per-logged-day averages, energy shares, a `days` list, late meals, the `nutrition.py` numbers and a `previous_week` block, both weeks measured by the one `_window_numbers`; three `user_rows_between` reads per person, split into the two windows in memory - see *Nutrition numbers*); two pure helpers for the report text: `previous_advice` (last week's stored report minus its header and the prompt's `<<<`/`>>>` markers, or None when it carries no advice) and `split_message` (Telegram-sized pieces of at most 4000 characters). |
@@ -340,9 +340,34 @@ every chat model accepts); anything else raises and counts as a failure rather t
 dropping part of the request. A system instruction becomes a leading system message. An image
 picks `GROQ_VISION_MODEL`, otherwise `GROQ_TEXT_MODEL` - decided from the contents, not from which
 Gemini model gave up, since both Gemini env vars may name the same model. A schema becomes a
-`json_schema` response format that is deliberately *non-strict*: strict mode demands every
-property be required, while our pydantic models give most fields a default so one missing number
-does not lose a meal. Reasoning models are told to keep their thinking out of `message.content`
+`json_schema` response format with `strict: true`. The first version was best-effort
+(`strict: false`) so the pydantic defaults could cover a missing number, and production showed what
+that buys: a photo estimate from `qwen/qwen3.8-27b` came back with its key quoting broken
+(`"protein_g": 25, "fat_g\": 18, ": 50, ...` - the `\"` escapes the quote that should close the
+key). Sometimes that is still valid JSON with junk keys like `fat_g": 18, `, which pydantic
+ignores before filling every real field with its default, so the meal was logged as 25 g of
+protein and zeros; sometimes the model loops until the token limit and Groq answers 400
+`json_validate_failed`. Strict mode constrains the decoding to the schema instead, and the same
+request answered completely in 130 tokens. It only accepts a schema in which every object lists
+all its properties in `required` and sets `additionalProperties: false`, so `strict_schema` builds
+one from `model_json_schema()` (on a deep copy, so the dict it was handed is never changed): those two rules on
+every object in the tree, `$defs` included, so a nested model added later cannot go out
+non-strict; `default` and `title` dropped everywhere, as is the model's top-level `description`;
+field descriptions, bounds and the `anyOf: [..., {"type": "null"}]` of an optional field kept (a
+nullable field is required too, the model answers `null`). A free-form mapping field has no key set
+to require and raises rather than going out as an object that must stay empty. Behind strict mode,
+for an operator-configured model that ignores it, a schema answer must parse as a JSON object
+carrying every top-level property of the schema; otherwise `ValueError` names the missing keys and
+quotes the first 300 characters of the answer, which the WARNING below shows. Every request also
+carries `max_completion_tokens`, because Groq's free tier counts the *requested* cap against a
+model's output tokens per minute, and with no cap the server reserves the model's maximum: the free
+vision model's limit is 1000 OTPM, and an uncapped photo estimate was refused outright with 429
+"Request too large ... Requested 2041". Schema calls get 600 (food, revise and sport answers
+measured at about 70-130 tokens including reasoning, and the cap must stay under that 1000); the
+free-text weekly report gets 4096, since a group report runs to several thousand characters of
+Ukrainian, and if a model refuses that cap the report job already degrades to its numbers-only
+fallback. An answer whose `finish_reason` is `length` was cut off at the cap and raises, for both
+kinds of call. Reasoning models are told to keep their thinking out of `message.content`
 (`include_reasoning: false` for GPT-OSS, which rejects `reasoning_format`; `reasoning_format:
 "hidden"` for Qwen and MiniMax models, which inline a `<think>` block by default and require `parsed` or
 `hidden` in JSON mode); any other model gets neither field, and a leading `<think>...</think>` is

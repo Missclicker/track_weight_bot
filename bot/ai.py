@@ -657,7 +657,11 @@ class GeminiClient:
             except Exception as exc:
                 # No traceback: a second provider being down or answering badly while the first
                 # is out is the same kind of expected condition as the outage itself.
-                log.warning("Groq %s fallback failed too: %r", groq_model, exc)
+                # The type is named apart: some errors (a bare `TimeoutError()`) carry no text at
+                # all, and `%r` would double the backslashes a corrupt answer is made of.
+                log.warning(
+                    "Groq %s fallback failed too: %s: %s", groq_model, type(exc).__name__, exc
+                )
             else:
                 return raw
             # The original outage, untouched (its `__cause__` is still Gemini's APIError, if it had
