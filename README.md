@@ -1,6 +1,17 @@
 # track_weight_bot
 
-A small Telegram bot for a friend group that wants to lose weight together. It lives in one group chat and:
+A Telegram bot for a small group that wants to lose weight together. Can be used as personal bot, but group therapy is recommended. Post a photo of your lunch — the bot estimates calories and macros with Gemini Vision (Grok as fallback when Gemini's free quota runs out), logs it to a shared Google Sheet and replies with your running total for the day. Post a bare number — that's your weight. Every Monday it writes a nutritionist-style weekly report for the group, and it nags whoever hasn't weighed in by 11:00. Wrong estimate? Reply to it with a correction ("no bread", "300 g") and it re-estimates from the same photo.
+
+No server to pay for: long polling, Google Sheets as the database, Gemini and Grok free tiers, an Oracle Cloud Always Free VM for hosting — **$0/month**. Tested with pytest (parsing, report logic and routing through a real aiogram dispatcher), deployed with Docker.
+
+<!-- SCREENSHOT 1: photo → estimate -->
+![Food photo and the bot's calorie estimate](docs/img/estimate.png)
+
+<!-- SCREENSHOT 2: weekly report -->
+![Weekly nutrition report](docs/img/weekly-report.png)
+
+<!-- SCREENSHOT 3: Google Sheet -->
+![The food tab in Google Sheets](docs/img/sheet.png)
 
 1. **Counts calories from food photos** (Gemini vision, free tier) and logs them to a Google Sheet — with a separate alcohol counter.
 2. **Records weight** when someone posts a number like `84.3` (or replies to the morning ping).
