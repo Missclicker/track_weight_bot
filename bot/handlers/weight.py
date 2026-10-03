@@ -9,6 +9,7 @@ from aiogram.types import Message
 from bot import i18n
 from bot.config import Settings
 from bot.handlers import ensure_user
+from bot.i18n import DEFAULT_LANG, Lang
 from bot.parsing import parse_weight
 from bot.scheduler import user_now
 from bot.sheets import SheetsRepo
@@ -57,7 +58,8 @@ def weigh_in(message: Message, bot: Bot, settings: Settings) -> tuple[float, str
         return None
     if replied is None:
         return kg, "text"
-    if replied.startswith(i18n.PING_PREFIX):
+    # any language's ping: it was sent in the group's language, not necessarily the replier's
+    if replied.startswith(i18n.PING_PREFIXES):
         return kg, "ping"
     return kg, "reply"
 
@@ -81,22 +83,29 @@ class WeightText(BaseFilter):
 
 
 async def record_weight(
-    message: Message, kg: float, repo: SheetsRepo, settings: Settings, source: str
+    message: Message,
+    kg: float,
+    repo: SheetsRepo,
+    settings: Settings,
+    source: str,
+    lang: Lang = DEFAULT_LANG,
 ) -> None:
-    """Store a weigh-in for the sender and confirm with the delta vs the previous entry."""
+    """Store a weigh-in for the sender and confirm, in `lang`, with the delta vs the previous
+    entry."""
+    strings = i18n.t(lang)
     user = await ensure_user(message, repo, settings)
     now = user_now(user, settings)
     previous = await repo.last_weight(user.user_id, now)
     await repo.add_weight(user, kg, now, source)
     if previous is None:
-        text = i18n.WEIGHT_FIRST.format(kg=i18n.fmt_kg(kg))
+        text = strings.WEIGHT_FIRST.format(kg=i18n.fmt_kg(kg))
     else:
         prev_date, prev_kg = previous
         delta = round(kg - prev_kg, 1)
         if delta == 0:
-            text = i18n.WEIGHT_SAME.format(kg=i18n.fmt_kg(kg), prev_date=prev_date.isoformat())
+            text = strings.WEIGHT_SAME.format(kg=i18n.fmt_kg(kg), prev_date=prev_date.isoformat())
         else:
-            text = i18n.WEIGHT_WITH_DELTA.format(
+            text = strings.WEIGHT_WITH_DELTA.format(
                 kg=i18n.fmt_kg(kg),
                 prev=i18n.fmt_kg(prev_kg),
                 prev_date=prev_date.isoformat(),
@@ -106,9 +115,9 @@ async def record_weight(
 
 
 async def on_weight(
-    message: Message, kg: float, source: str, repo: SheetsRepo, settings: Settings
+    message: Message, kg: float, source: str, repo: SheetsRepo, settings: Settings, lang: Lang
 ) -> None:
-    await record_weight(message, kg, repo, settings, source)
+    await record_weight(message, kg, repo, settings, source, lang)
 
 
 def build() -> Router:

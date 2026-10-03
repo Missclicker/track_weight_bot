@@ -6,6 +6,7 @@ private message path is testable without a clock or a network.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,7 +19,7 @@ from bot import i18n
 from bot.config import Settings
 from bot.parsing import parse_water_schedule
 from bot.scheduler import WATER_JOB_ID, Jobs, build_scheduler
-from bot.sheets import WaterSubscription
+from bot.sheets import User, WaterSubscription
 from tests.conftest import FakeRepo
 
 # a Monday; 07:00 UTC is 09:00 in Kyiv (winter, UTC+2) and 07:00 in Lisbon (UTC+0)
@@ -81,14 +82,14 @@ async def test_only_due_subscribers_are_pinged(water) -> None:
         _sub(3, "будні з 10 до 18 кожні 30 хвилин"),  # window has not started
     )
     await jobs.water_tick(MONDAY_0700_UTC)
-    assert bot.sent == [(1, i18n.WATER_PING)]
+    assert bot.sent == [(1, i18n.uk.WATER_PING)]
 
 
 async def test_seconds_do_not_shift_the_grid(water) -> None:
     jobs, bot, repo = water
     await _load(jobs, repo, _sub(1, "будні з 9 до 18 кожні 30 хвилин"))
     await jobs.water_tick(MONDAY_0700_UTC.replace(second=41, microsecond=500))
-    assert bot.sent == [(1, i18n.WATER_PING)]
+    assert bot.sent == [(1, i18n.uk.WATER_PING)]
 
 
 async def test_each_subscriber_is_evaluated_in_their_own_timezone(water) -> None:
@@ -114,13 +115,13 @@ async def test_forbidden_recipient_is_unsubscribed(water) -> None:
     )
     bot.forbidden.add(1)
     await jobs.water_tick(MONDAY_0700_UTC)
-    assert bot.sent == [(2, i18n.WATER_PING)]
+    assert bot.sent == [(2, i18n.uk.WATER_PING)]
     row = next(r for r in repo.rows["water"] if r["user_id"] == 1)
     assert row["active"] == "FALSE"
 
     bot.forbidden.clear()  # even if they unblock the bot, the next tick skips them
     await jobs.water_tick(MONDAY_0700_UTC)
-    assert bot.sent == [(2, i18n.WATER_PING), (2, i18n.WATER_PING)]
+    assert bot.sent == [(2, i18n.uk.WATER_PING), (2, i18n.uk.WATER_PING)]
 
 
 async def test_deleted_chat_is_unsubscribed_but_other_bad_requests_are_not(water) -> None:
@@ -135,7 +136,7 @@ async def test_deleted_chat_is_unsubscribed_but_other_bad_requests_are_not(water
     bot.gone.add(1)
     bot.flaky.add(2)
     await jobs.water_tick(MONDAY_0700_UTC)
-    assert bot.sent == [(3, i18n.WATER_PING)]
+    assert bot.sent == [(3, i18n.uk.WATER_PING)]
     active = {r["user_id"] for r in repo.rows["water"] if r["active"] == "TRUE"}
     assert active == {2, 3}  # "chat not found" is final, "message is too long" is our bug
     assert [s.user_id for s in jobs._water] == [2, 3]
@@ -187,7 +188,57 @@ async def test_reload_keeps_only_active_subscriptions(water) -> None:
     await repo.deactivate_water_subscription(2)
     await jobs.reload_water_subscriptions()
     await jobs.water_tick(MONDAY_0700_UTC)
-    assert bot.sent == [(1, i18n.WATER_PING)]
+    assert bot.sent == [(1, i18n.uk.WATER_PING)]
+
+
+async def test_each_reminder_is_in_its_subscribers_language(water) -> None:
+    """A reminder is a DM: whoever the group's majority is, it speaks its reader's language."""
+    jobs, bot, repo = water
+    for uid, lang in ((1, "en"), (2, "uk"), (3, None)):
+        await repo.upsert_user(User(user_id=uid, chat_id=-100, name=f"user{uid}", lang=lang))
+    await _load(
+        jobs,
+        repo,
+        _sub(1, "будні з 9 до 18 кожні 30 хвилин"),
+        _sub(2, "будні з 9 до 18 кожні 30 хвилин"),
+        _sub(3, "будні з 9 до 18 кожні 30 хвилин"),
+    )
+    await jobs.water_tick(MONDAY_0700_UTC)
+    assert bot.sent == [
+        (1, i18n.en.WATER_PING),
+        (2, i18n.uk.WATER_PING),
+        (3, i18n.uk.WATER_PING),  # never chose: the default
+    ]
+
+
+async def test_a_failing_language_lookup_still_sends_the_reminder(
+    water, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """In the default language rather than not at all, and the subscription stays."""
+    jobs, bot, repo = water
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="user1", lang="en"))
+    await repo.upsert_user(User(user_id=2, chat_id=-100, name="user2", lang="en"))
+    await _load(
+        jobs,
+        repo,
+        _sub(1, "будні з 9 до 18 кожні 30 хвилин"),
+        _sub(2, "будні з 9 до 18 кожні 30 хвилин"),
+    )
+    original = repo.get_lang
+
+    async def flaky(user_id: int) -> str:
+        if user_id == 1:
+            raise RuntimeError("Sheets 500 after retries")
+        return await original(user_id)
+
+    monkeypatch.setattr(repo, "get_lang", flaky)
+    caplog.set_level(logging.WARNING, logger="bot.scheduler")
+    await jobs.water_tick(MONDAY_0700_UTC)
+
+    assert bot.sent == [(1, i18n.uk.WATER_PING), (2, i18n.en.WATER_PING)]
+    assert [s.user_id for s in jobs._water] == [1, 2]
+    assert all(r["active"] == "TRUE" for r in repo.rows["water"])
+    assert [r.levelname for r in caplog.records if r.exc_info] == ["WARNING"]
 
 
 async def test_nightly_refresh_reloads_water_but_a_broken_tab_keeps_the_pings(

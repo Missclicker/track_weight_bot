@@ -1,7 +1,8 @@
-"""Slash commands: /start /help /w /food /sport /today /kcal /target /profile /week.
+"""Slash commands: /start /help /w /food /sport /today /kcal /target /profile /week /lang.
 
 `/food` and `/sport` without an argument ask for the text and record whatever comes back as a
-reply, so the commands can be tapped from Telegram's command menu.
+reply, so the commands can be tapped from Telegram's command menu. `/lang` picks the language the
+bot answers the sender in.
 """
 
 from __future__ import annotations
@@ -18,10 +19,11 @@ from aiogram.types import ForceReply, Message
 from bot import i18n
 from bot.ai import GeminiClient
 from bot.config import Settings
-from bot.handlers import ensure_user
+from bot.handlers import ensure_user, find_member
 from bot.handlers.photos import record_food
 from bot.handlers.sport import record_sport
 from bot.handlers.weight import record_weight
+from bot.i18n import Lang, normalize_lang
 from bot.parsing import (
     HEIGHT_CM_MAX,
     HEIGHT_CM_MIN,
@@ -43,9 +45,10 @@ from bot.sheets import SheetsRepo
 
 _MAX_PROMPT_TEXT = 500  # same cap as corrections._MAX_CORRECTION_TEXT
 
-_PROMPT_PREFIXES: dict[str, str] = {
-    "food": i18n.FOOD_INPUT_PROMPT_PREFIX,
-    "sport": i18n.SPORT_INPUT_PROMPT_PREFIX,
+# every language's prefix: a prompt sent before its reader switched language must still work
+_PROMPT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "food": i18n.FOOD_INPUT_PROMPT_PREFIXES,
+    "sport": i18n.SPORT_INPUT_PROMPT_PREFIXES,
 }
 
 
@@ -53,7 +56,8 @@ class InputPrompt(BaseFilter):
     """A text reply to the bot's "Чекаю опис ..." prompt for `/food` or `/sport`.
 
     The prompt is recognised by its text prefix rather than a remembered message id, so it
-    survives a restart (the same trick as `weight.replied_bot_text`). Injects `payload`.
+    survives a restart (the same trick as `weight.replied_bot_text`), in any language. Injects
+    `payload`.
     """
 
     def __init__(self, kind: Literal["food", "sport"]) -> None:
@@ -72,6 +76,12 @@ class InputPrompt(BaseFilter):
         return {"payload": text[:_MAX_PROMPT_TEXT]}
 
 
+_ANY_PROMPT_PREFIX: tuple[str, ...] = (
+    *i18n.FOOD_INPUT_PROMPT_PREFIXES,
+    *i18n.SPORT_INPUT_PROMPT_PREFIXES,
+)
+
+
 class PromptCancel(BaseFilter):
     """A delete word ("видали", "скасуй") in reply to either input prompt: record nothing."""
 
@@ -79,35 +89,38 @@ class PromptCancel(BaseFilter):
         reply = message.reply_to_message
         if reply is None or reply.from_user is None or reply.from_user.id != bot.id:
             return False
-        if not (reply.text or "").startswith(tuple(_PROMPT_PREFIXES.values())):
+        if not (reply.text or "").startswith(_ANY_PROMPT_PREFIX):
             return False
         return is_delete_request(message.text)
 
 
-async def cmd_start(message: Message, repo: SheetsRepo, settings: Settings) -> None:
+async def cmd_start(message: Message, repo: SheetsRepo, settings: Settings, lang: Lang) -> None:
     user = await ensure_user(message, repo, settings)
     await message.answer(
-        i18n.START_REGISTERED.format(name=escape(user.name), deadline=settings.weigh_in_deadline)
+        i18n.t(lang).START_REGISTERED.format(
+            name=escape(user.name), deadline=settings.weigh_in_deadline
+        )
     )
 
 
-async def cmd_help(message: Message) -> None:
-    await message.answer(i18n.HELP)
+async def cmd_help(message: Message, lang: Lang) -> None:
+    await message.answer(i18n.t(lang).HELP)
 
 
 async def cmd_weight(
-    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings
+    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings, lang: Lang
 ) -> None:
     kg = parse_weight(command.args, settings.weight_min, settings.weight_max)
     if kg is None:
+        strings = i18n.t(lang)
         text = (
-            i18n.WEIGHT_USAGE
+            strings.WEIGHT_USAGE
             if not command.args
-            else i18n.WEIGHT_OUT_OF_RANGE.format(lo=settings.weight_min, hi=settings.weight_max)
+            else strings.WEIGHT_OUT_OF_RANGE.format(lo=settings.weight_min, hi=settings.weight_max)
         )
         await message.reply(text)
         return
-    await record_weight(message, kg, repo, settings, source="command")
+    await record_weight(message, kg, repo, settings, source="command", lang=lang)
 
 
 async def _record_food_text(
@@ -117,6 +130,7 @@ async def _record_food_text(
     ai: GeminiClient,
     settings: Settings,
     source: str,
+    lang: Lang,
 ) -> None:
     user = await ensure_user(message, repo, settings)
     # A stated clock and "вчора" date the meal and must not reach Gemini: either would be taken
@@ -124,66 +138,91 @@ async def _record_food_text(
     # is judged on the text as typed, "вчора" included.
     text, at = strip_meal_time(text)
     text, yesterday = strip_yesterday(text)
+    strings = i18n.t(lang)
     if not text:
         # a prompt reply of just "14:00" or "вчора" still names no dish: ask again rather than
         # have Gemini estimate an empty description
-        await message.reply(i18n.FOOD_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
+        await message.reply(strings.FOOD_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
         return
     est = await ai.estimate_food(
-        None, None, text, on_retry=partial(message.reply, i18n.AI_RETRYING)
+        None, None, text, on_retry=partial(message.reply, strings.AI_RETRYING), lang=lang
     )
     if not est.is_food:
-        await message.reply(i18n.FOOD_NOT_FOOD)
+        await message.reply(strings.FOOD_NOT_FOOD)
         return
-    await record_food(message, user, est, repo, settings, source, yesterday=yesterday, at=at)
+    await record_food(
+        message, user, est, repo, settings, source, yesterday=yesterday, at=at, lang=lang
+    )
 
 
 async def cmd_food(
-    message: Message, command: CommandObject, repo: SheetsRepo, ai: GeminiClient, settings: Settings
+    message: Message,
+    command: CommandObject,
+    repo: SheetsRepo,
+    ai: GeminiClient,
+    settings: Settings,
+    lang: Lang,
 ) -> None:
     # the time and the marker are stripped before the emptiness test, so a bare "/їжа вчора" or
     # "/їжа 14:00" is still the bare command: the prompt goes out and the description comes back
     # as a reply (which may state the time and "вчора" again - the bare command's are not kept)
     text, _ = strip_yesterday(strip_meal_time(command.args)[0])
     if not text:
-        await message.reply(i18n.FOOD_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
+        await message.reply(i18n.t(lang).FOOD_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
         return
-    await _record_food_text(message, command.args, repo, ai, settings, "text")
+    await _record_food_text(message, command.args, repo, ai, settings, "text", lang)
 
 
 async def on_food_prompt_reply(
-    message: Message, payload: str, repo: SheetsRepo, ai: GeminiClient, settings: Settings
+    message: Message,
+    payload: str,
+    repo: SheetsRepo,
+    ai: GeminiClient,
+    settings: Settings,
+    lang: Lang,
 ) -> None:
-    await _record_food_text(message, payload, repo, ai, settings, "prompt")
+    await _record_food_text(message, payload, repo, ai, settings, "prompt", lang)
 
 
 async def cmd_sport(
-    message: Message, command: CommandObject, repo: SheetsRepo, ai: GeminiClient, settings: Settings
+    message: Message,
+    command: CommandObject,
+    repo: SheetsRepo,
+    ai: GeminiClient,
+    settings: Settings,
+    lang: Lang,
 ) -> None:
     # same as `cmd_food`: "/спорт вчора" alone names no activity yet, so it asks for one
     text, _ = strip_yesterday(command.args)
     if not text:
-        await message.reply(i18n.SPORT_INPUT_PROMPT, reply_markup=ForceReply(selective=True))
+        await message.reply(
+            i18n.t(lang).SPORT_INPUT_PROMPT, reply_markup=ForceReply(selective=True)
+        )
         return
-    await record_sport(message, command.args, repo, ai, settings, source="command")
+    await record_sport(message, command.args, repo, ai, settings, source="command", lang=lang)
 
 
 async def on_sport_prompt_reply(
-    message: Message, payload: str, repo: SheetsRepo, ai: GeminiClient, settings: Settings
+    message: Message,
+    payload: str,
+    repo: SheetsRepo,
+    ai: GeminiClient,
+    settings: Settings,
+    lang: Lang,
 ) -> None:
-    await record_sport(message, payload, repo, ai, settings, source="prompt")
+    await record_sport(message, payload, repo, ai, settings, source="prompt", lang=lang)
 
 
-async def on_prompt_cancel(message: Message) -> None:
-    await message.reply(i18n.PROMPT_CANCELLED)
+async def on_prompt_cancel(message: Message, lang: Lang) -> None:
+    await message.reply(i18n.t(lang).PROMPT_CANCELLED)
 
 
-async def cmd_today(message: Message, repo: SheetsRepo, settings: Settings) -> None:
+async def cmd_today(message: Message, repo: SheetsRepo, settings: Settings, lang: Lang) -> None:
     user = await ensure_user(message, repo, settings)
     today = user_now(user, settings).date()
     s = await today_summary(repo, user, today)
     await message.reply(
-        i18n.today_summary(
+        i18n.t(lang).today_summary(
             user.name,
             today.isoformat(),
             s.kcal_in,
@@ -198,7 +237,7 @@ async def cmd_today(message: Message, repo: SheetsRepo, settings: Settings) -> N
 
 
 async def cmd_kcal(
-    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings
+    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings, lang: Lang
 ) -> None:
     user = await ensure_user(message, repo, settings)
     # "/калорії вчора" lists the previous day; any other argument is ignored, as before
@@ -206,38 +245,40 @@ async def cmd_kcal(
     day = user_now(user, settings).date() - timedelta(days=1 if yesterday else 0)
     food = await day_food(repo, user.user_id, day)
     await message.reply(
-        i18n.kcal_today(
+        i18n.t(lang).kcal_today(
             user.name, day.isoformat(), food.items, user.daily_kcal_target, yesterday=yesterday
         )
     )
 
 
 async def cmd_target(
-    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings
+    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings, lang: Lang
 ) -> None:
+    strings = i18n.t(lang)
     user = await ensure_user(message, repo, settings)
     if not command.args:
         if user.daily_kcal_target:
-            text = i18n.TARGET_CURRENT.format(kcal=f"{user.daily_kcal_target:.0f}")
+            text = strings.TARGET_CURRENT.format(kcal=f"{user.daily_kcal_target:.0f}")
         else:
-            text = i18n.TARGET_NONE
+            text = strings.TARGET_NONE
         await message.reply(text)
         return
     if is_target_clear_request(command.args):
         await repo.set_daily_kcal_target(user.user_id, user.chat_id, None)
-        await message.reply(i18n.TARGET_CLEARED)
+        await message.reply(strings.TARGET_CLEARED)
         return
     target = parse_kcal_target(command.args)
     if target is None:
-        await message.reply(i18n.TARGET_USAGE.format(lo=KCAL_TARGET_MIN, hi=KCAL_TARGET_MAX))
+        await message.reply(strings.TARGET_USAGE.format(lo=KCAL_TARGET_MIN, hi=KCAL_TARGET_MAX))
         return
     await repo.set_daily_kcal_target(user.user_id, user.chat_id, target)
-    await message.reply(i18n.TARGET_SET.format(kcal=f"{target:.0f}"))
+    await message.reply(strings.TARGET_SET.format(kcal=f"{target:.0f}"))
 
 
 async def cmd_profile(
-    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings
+    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings, lang: Lang
 ) -> None:
+    strings = i18n.t(lang)
     user = await ensure_user(message, repo, settings)
     # Read back rather than trust `ensure_user`: on first contact it returns the blank row it just
     # built, while the stored one already carries the profile set in the person's other chats (see
@@ -245,19 +286,19 @@ async def cmd_profile(
     user = await repo.get_user(user.user_id, user.chat_id) or user
     current_year = user_now(user, settings).year
     if not command.args:
-        profile = i18n.fmt_profile(user.birth_year, user.sex, user.height_cm, current_year)
+        profile = strings.fmt_profile(user.birth_year, user.sex, user.height_cm, current_year)
         await message.reply(
-            i18n.PROFILE_CURRENT.format(profile=profile) if profile else i18n.PROFILE_NONE
+            strings.PROFILE_CURRENT.format(profile=profile) if profile else strings.PROFILE_NONE
         )
         return
     if is_target_clear_request(command.args):
         await repo.set_profile(user.user_id, None, None, None)
-        await message.reply(i18n.PROFILE_CLEARED)
+        await message.reply(strings.PROFILE_CLEARED)
         return
     update = parse_profile(command.args, current_year)
     if update is None:
         await message.reply(
-            i18n.PROFILE_USAGE.format(
+            strings.PROFILE_USAGE.format(
                 year_lo=current_year - PROFILE_AGE_MAX,
                 year_hi=current_year - PROFILE_AGE_MIN,
                 age_lo=PROFILE_AGE_MIN,
@@ -273,12 +314,40 @@ async def cmd_profile(
     sex = update.sex if update.sex is not None else user.sex
     height_cm = update.height_cm if update.height_cm is not None else user.height_cm
     await repo.set_profile(user.user_id, birth_year, sex, height_cm)
-    profile = i18n.fmt_profile(birth_year, sex, height_cm, current_year)
-    await message.reply(i18n.PROFILE_SET.format(profile=profile))
+    profile = strings.fmt_profile(birth_year, sex, height_cm, current_year)
+    await message.reply(strings.PROFILE_SET.format(profile=profile))
 
 
 async def cmd_week(message: Message, jobs: Jobs) -> None:
     await jobs.run_weekly_report(message.chat.id)
+
+
+async def cmd_lang(
+    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings, lang: Lang
+) -> None:
+    """Show or switch the language the bot answers the sender in.
+
+    The language belongs to the person, not to one chat: `set_lang` writes it on every `users` row
+    they have, so switching in the group switches the DM replies too, and the other way round.
+    Also reachable from a DM outside ALLOWED_CHAT_IDS (see `build_router`), there for members
+    only: a DM must never register anybody, exactly as for `/вода`.
+    """
+    assert message.from_user is not None
+    if message.chat.id in settings.allowed_chat_ids:
+        await ensure_user(message, repo, settings)
+    elif await find_member(message.from_user.id, repo, settings) is None:
+        await message.answer(i18n.t(lang).PRIVATE_CHAT_ONLY_GROUP)
+        return
+    if not command.args:
+        await message.reply(i18n.t(lang).LANG_CURRENT)
+        return
+    new = normalize_lang(command.args)
+    if new is None:
+        await message.reply(i18n.t(lang).LANG_USAGE)
+        return
+    await repo.set_lang(message.from_user.id, new)
+    # in the language just chosen: it is the first answer of the new regime
+    await message.reply(i18n.t(new).LANG_SET)
 
 
 def build() -> Router:
@@ -297,6 +366,7 @@ def build() -> Router:
     router.message.register(cmd_target, Command(*aliases["target"]))
     router.message.register(cmd_profile, Command(*aliases["profile"]))
     router.message.register(cmd_week, Command(*aliases["week"]))
+    router.message.register(cmd_lang, Command(*aliases["lang"]))
     # after the commands, but still in the first router inside `guarded`: an answer to the food
     # prompt must be read as food even when it is a bare number (which `weight` would grab) or a
     # reply the `corrections` router would otherwise inspect.

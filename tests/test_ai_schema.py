@@ -84,7 +84,7 @@ def test_food_estimate_rejects_garbage_number() -> None:
 
 
 def _reply(est: FoodEstimate) -> str:
-    return i18n.food_estimate(
+    return i18n.uk.food_estimate(
         est.dish,
         est.kcal,
         est.alcohol_kcal,

@@ -20,7 +20,7 @@ No server to pay for: long polling, Google Sheets as the database, Gemini and Gr
 5. **Posts a weekly nutritionist-style report** every Monday morning about the week that just ended (and on `/week` about the last 7 full days) — energy against your kcal target and a maintenance estimate, protein against an age-based norm (1.2 g/kg under 40, 1.5 g/kg from 40), macro balance, vegetables, alcohol, late meals, weight and BMI, how the week compares with the one before, and a follow-up on last week's advice, closing with a few concrete goals for the new week. Birth year, sex and height (`/профіль`) are optional: without them the report is simpler and skips the protein norm and the energy estimate. A long report arrives as several messages. In a one-to-one chat the text is written for you alone; that personal report is skipped if you already get one in a group.
 6. **Reminds you to drink water** in a private message, on a schedule you pick yourself (`/вода будні з 9 до 18 кожні 30 хвилин`).
 
-Everything runs on free tiers: a Python bot with long polling (no public endpoint needed), Google Sheets as the database, Gemini Flash for AI. Estimated cost: **$0/month**. Bot replies are in Ukrainian by default (see `bot/i18n.py`).
+Everything runs on free tiers: a Python bot with long polling (no public endpoint needed), Google Sheets as the database, Gemini Flash for AI. Estimated cost: **$0/month**. Bot replies are in Ukrainian by default; anyone can switch to English for themselves with `/lang en` (see [Languages](#languages) and `bot/i18n/`).
 
 > Calorie estimates from photos are rough (±30–50 %). The bot always says "≈" and you can correct any estimate by replying to it: a number sets the kcal directly, any other text ("це 300 г", "без хліба", "це солянка, а не борщ") makes Gemini re-estimate the dish, looking at the photo again.
 
@@ -55,6 +55,7 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    profile - Профіль для тижневого звіту: /profile 1981 ч 180
    week - Звіт за 7 останніх повних днів
    water - Нагадування пити воду: /water будні з 9 до 18 кожні 30 хв
+   lang - Мова / Language: /lang en, /lang uk
    help - Довідка
    vaga - Те саме, що /w
    yizha - Те саме, що /food
@@ -64,10 +65,11 @@ You need your own accounts and keys for everything below. Nothing is shared — 
    profil - Те саме, що /profile
    tyzhden - Те саме, що /week
    voda - Те саме, що /water
+   mova - Те саме, що /lang
    dovidka - Те саме, що /help
    ```
 
-   Every command also has a Cyrillic spelling the bot understands when typed — `/вага`, `/їжа`, `/спорт`, `/сьогодні`, `/калорії`, `/ціль`, `/профіль`, `/тиждень`, `/вода`, `/довідка`, `/старт` — but Telegram only allows `a-z 0-9 _` in registered commands, so those cannot go into `/setcommands` and won't autocomplete. The full alias table is `COMMANDS` in `bot/i18n.py`.
+   Every command also has a Cyrillic spelling the bot understands when typed — `/вага`, `/їжа`, `/спорт`, `/сьогодні`, `/калорії`, `/ціль`, `/профіль`, `/тиждень`, `/вода`, `/мова`, `/довідка`, `/старт` — but Telegram only allows `a-z 0-9 _` in registered commands, so those cannot go into `/setcommands` and won't autocomplete. The full alias table is `COMMANDS` in `bot/i18n/_common.py` (`/lang` is also `/language`).
 
 ### 2. Telegram group + privacy mode
 
@@ -99,7 +101,7 @@ Sheet layout (for reference / manual edits):
 
 | tab       | columns                                                                                                                                                      |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `users`   | `user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg, daily_kcal_target, birth_year, sex`                                          |
+| `users`   | `user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg, daily_kcal_target, birth_year, sex, lang`                                    |
 | `weight`  | `ts, date, user_id, name, kg, source`                                                                                                                        |
 | `food`    | `ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g, veg_share, confidence, source, message_id, corrected, photo_file_id, portion` |
 | `sport`   | `ts, date, user_id, name, activity, minutes, distance_km, kcal, source, message_id`                                                                          |
@@ -280,7 +282,7 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | reply to the bot's food estimate with a number                                                                                                     | sets kcal of that estimate — `84` stays 84 kcal, because the weight range overlaps plausible portions                                                                                                                                   |
 | reply to the bot's food estimate with a number that says kilograms: `84.3`, `84 кг`, `вага 84`                                                     | weight (`source` = `reply`)                                                                                                                                                                                                             |
 | reply to the bot's food estimate with text (weight, ingredients, dish name)                                                                        | Gemini re-estimates it (with the photo) and updates the row                                                                                                                                                                             |
-| `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/profile`, `/week`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                                                                                                                                                                                                       |
+| `/w`, `/food`, `/sport`, `/today`, `/kcal`, `/target`, `/profile`, `/week`, `/lang`, `/help` (+ transliterated and Cyrillic aliases, e.g. `/vaga`, `/вага`) | explicit commands                                                                                                                                                                                                                       |
 | `/water …` / `/вода …` (in the group or in the DM)                                                                                                 | water reminder schedule → `water`                                                                                                                                                                                                       |
 | `/sport біг 5 км 30 хв` (`/спорт …`)                                                                                                               | Gemini text parse → `sport`                                                                                                                                                                                                             |
 | `/їжа вчора млинці зі сметаною` (`/спорт вчора волейбол 2 години`), or "вчора" in a photo caption or a prompt reply                                | the same record, but dated **yesterday** in the user's timezone (`ts` still says when it was sent, unless a time is stated); the word is stripped before Gemini sees the text, and the reply names the date                             |
@@ -298,11 +300,17 @@ log a workout by mistake, so an activity is only recorded through `/sport` or a 
 Deleting is a real delete: the row disappears from the tab, so every total and the weekly report
 are right again immediately. Only the author of an entry can delete it.
 
-You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target`, `birth_year`, `sex` and `active` there can be edited by hand and are preserved; `daily_kcal_target` is also set from the chat with `/target 2000` (`/ціль 2000`) and cleared with `/target стоп`. It is optional: without it the bot just counts, with it every food reply, `/kcal` and `/today` show `(ціль N)`. The person's profile for the weekly report — `birth_year`, `sex` (`m`/`f`; a hand-typed `ч`/`ж` is understood too) and `height_cm` — is optional as well; from the chat it is set with `/profile 1981 ч 180` (`/профіль 45 ж 165`: any order, any subset, an age is stored as a birth year and the fields not named are kept) and cleared with `/профіль стоп`. Unlike the per-chat target it describes the person, so `/profile` writes those three cells on every `users` row of the sender — the group one and the DM one alike — and a profile cell left blank on one row (typed by hand into the group row only, say) is filled from the person's other rows.
+You do not have to run `/start`: the first weight, food or sport message registers the sender in the `users` tab. Columns `tz`, `height_cm`, `target_kg`, `daily_kcal_target`, `birth_year`, `sex`, `lang` and `active` there can be edited by hand and are preserved; `daily_kcal_target` is also set from the chat with `/target 2000` (`/ціль 2000`) and cleared with `/target стоп`. It is optional: without it the bot just counts, with it every food reply, `/kcal` and `/today` show `(ціль N)`. The person's profile for the weekly report — `birth_year`, `sex` (`m`/`f`; a hand-typed `ч`/`ж` is understood too) and `height_cm` — is optional as well; from the chat it is set with `/profile 1981 ч 180` (`/профіль 45 ж 165`: any order, any subset, an age is stored as a birth year and the fields not named are kept) and cleared with `/профіль стоп`. Unlike the per-chat target it describes the person, so `/profile` writes those three cells on every `users` row of the sender — the group one and the DM one alike — and a profile cell left blank on one row (typed by hand into the group row only, say) is filled from the person's other rows.
+
+## Languages
+
+The bot speaks Ukrainian and English, chosen per person: `/lang en` (`/мова en`) switches you to English, `/lang uk` back, `/lang` alone shows the current one. The choice is stored in the `lang` column on every `users` row of yours, so it follows you between the group and the private chat; a blank cell means Ukrainian, which is why nothing changed for anyone who never ran the command. `en`/`uk` (or `English`/`українська`) can also be typed into the cell by hand.
+
+Everything addressed to you is in your language: replies to your messages, your water reminders, and the dish name, portion and notes the AI writes for your food (so the `food` tab's `dish` column can hold both languages). Messages to the whole group — the morning weigh-in ping and the weekly report — use the language most of the group's active members chose (a blank counts as Ukrainian, a tie goes to English); a personal report in a DM uses its owner's language. Input is understood in both languages regardless of the setting: `delete`, `just kidding`, `yesterday`, `/target stop`, `/profile 45 female 165 cm`, `/water weekdays from 9 to 18 every 30 min` work for everyone, as do the Ukrainian forms.
 
 ## Water reminders
 
-`/вода будні дні з 9 до 18 кожні 30 хвилин` (also `/water`, `/voda`) subscribes the sender to "drink some water" pings. Days (`будні`, `вихідні`, `щодня`, a list like `пн, ср, пт` or a range like `пн-пт`), the window (`з 9 до 18`, `9:00-18:00`) and the interval are understood in Ukrainian and English in any order; only the interval is required and it must be between 15 minutes and 12 hours. Days default to every day and the window to 09:00–21:00. `/вода` alone shows the current schedule, `/вода стоп` switches it off.
+`/вода будні дні з 9 до 18 кожні 30 хвилин` (also `/water`, `/voda`) subscribes the sender to "drink some water" pings. Days (`будні`, `вихідні`, `щодня`, a list like `пн, ср, пт` or a range like `пн-пт` / `monday to friday`), the window (`з 9 до 18`, `9:00-18:00`, `between 9 and 18`) and the interval are understood in Ukrainian and English in any order; only the interval is required and it must be between 15 minutes and 12 hours. Days default to every day and the window to 09:00–21:00. `/вода` alone shows the current schedule, `/вода стоп` switches it off.
 
 The pings are **private messages**, and Telegram only lets a bot write to someone who has started a chat with it. So the bot sends the confirmation to the private chat first and stores the subscription only if that worked; otherwise it answers with a `https://t.me/<yourbot>?start=water` link — open it, press **Start**, repeat the command. Pressing Start there is also how a member gets the "I can write to you now" reply instead of the "works only in the group" one.
 

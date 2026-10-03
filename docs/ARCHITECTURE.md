@@ -20,30 +20,31 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 |---|---|
 | `bot/__main__.py` | Entry point. Loads settings (fails fast with a readable message), ensures the sheet schema, builds `Bot`/`Dispatcher`, injects dependencies, starts the scheduler and polling. |
 | `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist; a blank `GOOGLE_SERVICE_ACCOUNT_JSON` or `GROQ_API_KEY` reads as unset. |
-| `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
-| `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `parse_profile` (birth year or age, sex and height in any order, all-or-nothing, + the `ProfileUpdate` value object) / `parse_sex` (a typed word or a `users.sex` cell -> `"m"`/`"f"`), `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `strip_meal_time` (takes a leading or trailing `H:MM` / `H-MM` off a `/їжа` text as the meal time), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
-| `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
+| `bot/i18n/` | Every user-facing string, in Ukrainian (`uk.py`) and English (`en.py`) - the same names, signatures and placeholders in both, which `tests/test_i18n.py` enforces. `t(lang)` picks the module for a reader; `normalize_lang` reads a `/lang` argument or a hand-typed `users.lang` cell; `majority_lang` decides a group's language. The package root holds only what no language owns: `FOOD_PREFIX`, `COMMANDS`, `mention`, `fmt_kg`, `fmt_delta` and the all-language prefix tuples routing recognises bot messages by (see *Languages*). Formatting helpers escape HTML. |
+| `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `parse_profile` (birth year or age, sex and height in any order, all-or-nothing, + the `ProfileUpdate` value object) / `parse_sex` (a typed word or a `users.sex` cell -> `"m"`/`"f"`), `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `strip_meal_time` (takes a leading or trailing `H:MM` / `H-MM` off a `/їжа` text as the meal time), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). Every vocabulary is Ukrainian and English at once, whatever the sender's language (see *Languages*). |
+| `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace, Ukrainian and English display name) and `kcal = MET * kg * h`; `activity_title(key, lang)` names an activity for a reader. |
 | `bot/nutrition.py` | Pure numbers for the weekly report, None in -> None out: `age_on`, the age-based `protein_g_per_kg` and the `reference_weight` it multiplies, `bmi`, `bmr_mifflin` (Mifflin-St Jeor), `maintenance_kcal` (sedentary BMR + logged sport) and `energy_shares` (see *Nutrition numbers* below). |
-| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report` (the only call with a role: `REPORT_SYSTEM_INSTRUCTION` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). `_generate` wraps the Gemini ladder (`_generate_gemini`) and, when a `GroqClient` was passed in as `fallback`, hands the call to Groq on either outage; `check_available` is the photo precheck that knows about it (see *Groq fallback*). |
+| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report` - each takes a keyword-only `lang` for the language the model writes in (the only call with a role: `REPORT_SYSTEM_INSTRUCTIONS[lang]` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). `_generate` wraps the Gemini ladder (`_generate_gemini`) and, when a `GroqClient` was passed in as `fallback`, hands the call to Groq on either outage; `check_available` is the photo precheck that knows about it (see *Groq fallback*). |
 | `bot/fallback.py` | `GroqClient`: one Groq chat completion for a Gemini-shaped call - prompt strings and image `Part`s translated into chat content parts, the vision or text model picked by whether an image is present, a strict `json_schema` response format built from a pydantic schema by `strict_schema` plus a completeness check on the answer, an output cap on every request, reasoning kept out of the answer. Single attempt, no cooldowns (see *Groq fallback*). Not named `groq.py`, which would shadow the SDK. |
-| `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
+| `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions; `set_lang` / `get_lang` for the person's language. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
-| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini: per person the week's totals and per-logged-day averages, energy shares, a `days` list, late meals, the `nutrition.py` numbers and a `previous_week` block, both weeks measured by the one `_window_numbers`; three `user_rows_between` reads per person, split into the two windows in memory - see *Nutrition numbers*); two pure helpers for the report text: `previous_advice` (last week's stored report minus its header and the prompt's `<<<`/`>>>` markers, or None when it carries no advice) and `split_message` (Telegram-sized pieces of at most 4000 characters). |
-| `bot/scheduler.py` | `Jobs` (ping per timezone, water tick, weekly report) and `build_scheduler`. |
-| `bot/handlers/` | aiogram routers, one file per feature; `__init__.py` assembles them and holds the allowed-chat gate and the global error handler. |
+| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini: per person the week's totals and per-logged-day averages, energy shares, a `days` list, late meals, the `nutrition.py` numbers and a `previous_week` block, both weeks measured by the one `_window_numbers`; three `user_rows_between` reads per person, split into the two windows in memory - see *Nutrition numbers*); two pure helpers for the report text: `previous_advice` (last week's stored report, in either language, minus its header and the prompt's `<<<`/`>>>` markers, or None when it carries no advice) and `split_message` (Telegram-sized pieces of at most 4000 characters). |
+| `bot/scheduler.py` | `Jobs` (ping per timezone, water tick, weekly report, `chat_lang` - the language of a message to a whole chat) and `build_scheduler`. |
+| `bot/handlers/` | aiogram routers, one file per feature; `__init__.py` assembles them and holds the allowed-chat gate, the `SenderLang` middleware and the global error handler. |
 
 ## Data flow
 
 **Message routing.** The root router has two children, tried in order. `guarded` carries the
 `AllowedChat` filter and drops every message whose `chat.id` is not in `ALLOWED_CHAT_IDS` (a
 private chat whose id is listed - e.g. the owner testing in a DM - is served like a group).
-`private` then serves the two commands that make sense outside the group: `/start` (a member is
-told the bot can now DM them, anybody else gets "works only in the group") and `/вода`.
+`private` then serves the three commands that make sense outside the group: `/start` (a member is
+told the bot can now DM them, anybody else gets "works only in the group"), `/вода` and `/мова`
+(`/lang`, members only, like `/вода`).
 Inside `guarded` the routers are tried in order:
 
-1. `commands` - `/start /help /w /food /sport /today /kcal /target /profile /week`. `/target`
+1. `commands` - `/start /help /w /food /sport /today /kcal /target /profile /week /lang`. `/target`
    writes only the `daily_kcal_target` cell (`set_daily_kcal_target`), so other hand-edited
-   columns are untouched; the target is optional and `i18n._target_suffix` hides it when it is
+   columns are untouched; the target is optional and the i18n `_target_suffix` hides it when it is
    missing, zero or not a finite number. `/profile` (`/профіль 1981 ч 180`) stores the optional
    birth year, sex and height the weekly report can use: it merges what the message names into
    the sender's current values and `set_profile` writes only those three cells, but on *every*
@@ -54,7 +55,7 @@ Inside `guarded` the routers are tried in order:
    ends with "Разом за сьогодні: N ккал" (the new entry included); `/kcal` lists those rows, each
    line starting with the time it was logged at, or the meal time stated with it ("07:54 - 390
    ккал - ..."), read straight off the row's `ts` - it is already in the user's timezone, so no conversion happens. A hand-edited row
-   whose `ts` carries no usable time shows `i18n.KCAL_NO_TIME` ("--:--") instead, never midnight.
+   whose `ts` carries no usable time shows `KCAL_NO_TIME` ("--:--") instead, never midnight.
    `/kcal вчора` (`strip_yesterday` on the argument) lists the previous day the same way under
    its own header; any other argument is ignored.
    A bare `/food` or `/sport` (tapped from Telegram's command menu) answers with a `ForceReply`
@@ -70,9 +71,11 @@ Inside `guarded` the routers are tried in order:
    -> `delete_food_entry`, registered first so "видали" is never shipped to Gemini as a correction.
    That predicate is the *wide* vocabulary: the delete verbs plus filler words that
    `parsing.is_delete_request` already took ("видали цей запис"), plus the regret phrases people
-   type instead of an order - "не записуй", "це жарт", "я випадково", "помилково". Both are
-   whole-message and whole-word, so "прибери хліб" and "не записуй хліб" - drop an ingredient from
-   the estimate - stay corrections of the dish, and "помилкова порція" is not "помилка". The regret
+   type instead of an order - "не записуй", "це жарт", "я випадково", "помилково" (and "don't log",
+   "just kidding", "by accident", "my mistake"). Both are whole-message and whole-word, so "прибери
+   хліб", "не записуй хліб" and "remove the bread" - drop an ingredient from the estimate - stay
+   corrections of the dish, "помилкова порція" is not "помилка", and "remove one" is one piece
+   fewer, not a delete ("one" is no filler word; "delete this one" is a whole phrase). The regret
    half is deliberately food-only (`sport.SportDeleteReply`, `commands.PromptCancel` and
    `commands.InputPrompt` keep asking `is_delete_request`): a wrong photo is the thing people
    regret out loud, and widening the vocabulary everywhere would start eating ordinary replies.
@@ -89,7 +92,8 @@ Inside `guarded` the routers are tried in order:
    morning ping gives `source="ping"`, every other bot message (a sport confirmation, `/kcal`, the
    weekly report, an error reply) gives `source="reply"`, because people do weigh in by answering
    whatever is on screen. Our messages are told apart by their text prefix, never by a remembered
-   message id, so the whole thing survives a restart. A reply to another *person* is conversation
+   message id, so the whole thing survives a restart - and the prefix of every language counts
+   (`i18n.PING_PREFIXES`), since a ping sent in one language is answered by people reading another. A reply to another *person* is conversation
    and is ignored. The one stricter case is a reply to the `≈` food estimate, where
    `parse_weight(require_marker=True)` demands a decimal, a "кг"/"kg" unit or a "вага"/"weight"
    label: 40..200 overlaps perfectly plausible kcal corrections of a portion, so a bare "84" under
@@ -99,7 +103,8 @@ Inside `guarded` the routers are tried in order:
 5. `photos` - any photo -> Gemini vision -> reply -> `add_food` with the *reply's* `message_id`
    so a later correction can find the row.
 6. `sport` - a delete word (`parsing.is_delete_request`, the narrow vocabulary - the regret phrases
-   delete food rows only) in reply to a bot message starting with `Спорт:` -> `delete_sport_entry`.
+   delete food rows only) in reply to a bot message starting with `Спорт:` or `Sport:`
+   (`i18n.SPORT_PREFIXES`) -> `delete_sport_entry`.
    That is the whole router: any other reply to a sport confirmation is ignored, re-estimating an
    activity is not a thing the bot does - except a number, which `weight` (tried before this
    router) has already taken as a weigh-in.
@@ -120,12 +125,42 @@ Anything unmatched is ignored.
 
 **Users.** Nobody has to run `/start`: the first weight/food/sport message registers the sender
 (`ensure_user`). The `users` tab is editable by hand - `tz`, `height_cm`, `target_kg`,
-`daily_kcal_target`, `birth_year`, `sex`, `active` are preserved on upsert. `birth_year` and
-`sex` are trailing columns (see *Trailing columns*); a hand-typed cell counts only when it makes
-sense - a whole year in 1900..2100, a sex word `parse_sex` knows - and is otherwise read as
-unknown. A blank `birth_year`, `sex` or `height_cm` cell on one row is filled on read from the
-person's other rows (`_all_users_sync`; the row's own value wins), so every row of a person
-answers with the same profile and `/profile 45` from the DM merges the group's values, not blanks.
+`daily_kcal_target`, `birth_year`, `sex`, `lang`, `active` are preserved on upsert. `birth_year`,
+`sex` and `lang` are trailing columns (see *Trailing columns*); a hand-typed cell counts only when
+it makes sense - a whole year in 1900..2100, a sex word `parse_sex` knows, a language
+`i18n.normalize_lang` knows ("en", "English", "укр") - and is otherwise read as unknown. A blank
+`birth_year`, `sex`, `height_cm` or `lang` cell on one row is filled on read from the person's other
+rows (`_all_users_sync`; the row's own value wins), so every row of a person answers with the same
+profile and language, and `/profile 45` from the DM merges the group's values, not blanks.
+
+**Languages.** Ukrainian and English. The language belongs to the person: `/lang en` (`/мова`,
+`/mova`, `/language`; `/lang` alone shows the current one) runs `set_lang`, which writes the `lang`
+cell on *every* `users` row of the sender, like `/profile`, and clears the users cache so the very
+next message is answered in it. An unset cell means Ukrainian, so everybody who registered before
+English existed sees no change. A reply to one person speaks that person's language: `SenderLang`,
+an *inner* middleware on the root router's message observer (aiogram runs a router's inner
+middlewares for every nested router, and only after a handler's filters matched, so ignored chatter
+costs no lookup), injects `lang` from `get_lang` - the cached `users` tab - and handlers take
+`i18n.t(lang)`. The error observer does not see handler data, so `on_error` looks the language up
+again. Both lookups fall back to Ukrainian with a WARNING instead of raising: a Sheets outage must
+not turn `/help` into an error, nor swallow the error reply it is reporting. A correction or delete
+is answered in its sender's language, who is always the entry's author.
+What the model writes for a person follows them too: `estimate_food`, `revise_food` and
+`parse_sport` take `lang`, the food prompts ask for the dish, portion and notes in that language
+(the sheet's `dish` column therefore holds both), and the sport title comes from
+`met.activity_title`. A message to a whole chat - the morning ping and the weekly report with its
+fallbacks - is written in `Jobs.chat_lang`: a DM in its owner's language, a group in the language
+most of its *active* users chose (`i18n.majority_lang`: an unset language votes Ukrainian, a tie
+goes to English), and a group with nobody active keeps the default - no votes is not a tie. The
+ping votes over the whole active roster it already reads, not only the people it mentions. A water
+reminder is a DM and uses its subscriber's language. A failed language read never costs a ping, a
+reminder or a report: it falls back to Ukrainian with a WARNING. Recognising our own messages works
+in every language at once (`i18n.SPORT_PREFIXES`, `PING_PREFIXES` and the two input-prompt
+tuples), because a message stays on screen after its reader switches; the `≈` food prefix is
+shared. Input is never tied to the setting: every parser understands both vocabularies for
+everyone. The only Ukrainian in the English strings is the way back ("перейти на українську:
+/lang uk" in `/help` and `/lang`), as the Ukrainian `/lang` carries the English way out - somebody
+who switched by mistake may not read the language they landed in.
 
 **Dates.** Every timestamp is written in the user's timezone (`users.tz`, fallback
 `DEFAULT_TZ`) and "today" is computed there. The `date` column is the lookup key for all
@@ -161,17 +196,17 @@ users and (re)creates one cron job per timezone at `WEIGH_IN_DEADLINE`. The job 
 `WEEKLY_REPORT_TIME` in `DEFAULT_TZ` (default Monday 09:00): build payload -> Gemini -> send ->
 `reports` tab. If Gemini fails, the numeric summary is sent instead. The window is always the 7
 *full* days before the run (`today - 7 .. today - 1`), so the current, half-logged day never
-skews the numbers. A chat with a positive id is a DM: it gets `PERSONAL_REPORT_PROMPT` instead of
-the group one, and the scheduled run skips it entirely when that user is also an active member of
+skews the numbers. Ping and report are written in the chat's language (see *Languages*). A chat
+with a positive id is a DM: it gets `PERSONAL_REPORT_PROMPTS` instead of the group one, and the scheduled run skips it entirely when that user is also an active member of
 one of the allowed group chats (they already get their numbers there). `/week` ignores that skip -
 an explicit ask is always answered.
 
 **Weekly report.** The report is written by a nutritionist persona - evidence-based, with
 sports-nutrition and 40+ expertise, warm and never shaming, no diagnoses or doses, a doctor only
 for the red flags it names, only the numbers in the data and never an invented one (concrete
-targets in the recommendations and differences between given numbers are fine), plain Ukrainian
-text. That role is
-`REPORT_SYSTEM_INSTRUCTION`, sent as the config's `system_instruction` rather than as a paragraph
+targets in the recommendations and differences between given numbers are fine), plain text in
+the chat's language. That role is
+`REPORT_SYSTEM_INSTRUCTIONS[lang]`, sent as the config's `system_instruction` rather than as a paragraph
 of the prompt: the persona and its rules hold for the whole answer whatever the week looked like,
 so they stay apart from the per-week task and the data, and the free text inside the prompt
 (names, last week's report) has a harder time overriding them. The other three Gemini calls send
@@ -179,6 +214,12 @@ no system instruction. The two prompts carry the rest: the labelled lines per pe
 (~1100 characters a person in a group, ~2500 in a DM), the simpler report for somebody without a
 profile, how the bot computes the protein target (so the model explains it but never recomputes
 it) and notes on what the payload fields mean.
+Every language-dependent piece of the report prompts - the language named, the seven line labels
+(Енергія ... На цей тиждень / Energy ... This week), the `/профіль 1981 ч 180` / `/profile 1981 m
+180` hint - is one `_ReportWords` entry per language, and the prompts are built from it once at
+import into the `REPORT_SYSTEM_INSTRUCTIONS`, `REPORT_PROMPTS`, `PERSONAL_REPORT_PROMPTS` and
+`_PREVIOUS_REPORT_BLOCKS` dicts; the Ukrainian ones are byte-identical to the single-language
+prompts they replaced (a test pins that), and the old `REPORT_*` names still point at them.
 For continuity the job hands the model last week's report:
 `SheetsRepo.get_previous_report(chat_id, week_start)` picks the stored report of that chat whose
 `week_start` falls in `[week_start - 13, week_start - 7]`, the latest `ts` winning. That is a window which ended before
@@ -215,7 +256,7 @@ denominator, because the model's kcal and macros do not always agree and the sha
 to ~100), a `days` list (kcal, protein, alcohol and entries per logged day - the day counts against
 a target are taken from these rounded figures, so the two never disagree), `alcohol_days`,
 `meals_per_logged_day` and `days_over_kcal_target` (null without a target that passes the
-`i18n._target_suffix` rule). The protein target is `protein_g_per_kg(age)` x `reference_weight`:
+i18n `_target_suffix` rule). The protein target is `protein_g_per_kg(age)` x `reference_weight`:
 1.2 g/kg below 40, 1.5 g/kg from 40. The 0.8 g/kg RDA is for weight-stable adults; a calorie
 deficit raises the need to keep lean mass, and muscle responds less to protein with age (anabolic
 resistance), which is why guidance for older adults sits at 1.0-1.2 g/kg and higher with training
@@ -244,7 +285,7 @@ rows are split into the windows by their `date` in memory - three reads per pers
 appears is unchanged (rows in the current window). A person without a birth year, sex or height
 simply gets nulls - no age means no protein target, no BMR and no maintenance estimate; no sex or
 height, no BMR; no height, no BMI - and the simpler report with one hint at `/profile`. The numbers-only fallback
-(`i18n.weekly_stats_block`) shows the protein average and, when there is one, the target.
+(`weekly_stats_block` in `bot/i18n/`) shows the protein average and, when there is one, the target.
 
 **Water reminders.** One `water_tick` job runs every minute and walks an in-memory list of the
 active rows of the `water` tab, so a per-user interval costs neither a job per subscriber nor a
@@ -288,8 +329,8 @@ register is in memory only: a restart forgets it and the next 429 simply re-arms
 may have armed the cooldown while this one slept) and, ahead of everything else, by
 `photos.on_photo` through `check_available` - a photo download and a Sheets read are not worth
 paying for just to learn the vision quota is gone (unless the Groq fallback is on, which can still
-answer). Unless Groq answers instead (see *Groq fallback*), the user gets one of four Ukrainian
-messages (`i18n.quota_notice`, chosen by *which* model ran out and *whether* it was a per-day
+answer). Unless Groq answers instead (see *Groq fallback*), the user gets one of four
+messages (`quota_notice`, in the sender's language, chosen by *which* model ran out and *whether* it was a per-day
 limit); the photo ones point at `/їжа <текст>`, which still works - unless the text model is unusable too, in which case
 `_is_vision_only_outage` drops that advice: either both env vars name the same model, or the text
 model is itself out of quota or riding out a demand spike (see *Gemini overload*).
@@ -303,7 +344,7 @@ cannot put the budget out of reach and switch this whole path off). The escalati
 slow backend a longer deadline, and an overloaded model refuses immediately instead of running long,
 so attempt three could only repeat the refusal - at the price of ~28 s of somebody staring at a
 photo they just sent. The "retrying" notice is skipped too: the whole call is over in about two
-seconds, and `i18n.AI_RETRYING` followed straight away by the overload reply is two messages for
+seconds, and `AI_RETRYING` followed straight away by the overload reply is two messages for
 nothing (a notice already sent because of an earlier non-503 failure in the same call stays).
 Detection is `APIError.code == 503` only, never the response text: the wording and its locale are
 not a contract. When it gives up, `_generate_gemini` sets the model aside for `_OVERLOAD_COOLDOWN_S` (30 s
@@ -316,7 +357,7 @@ event rather than a bare "attempt 2 failed" the reader has to join up - and rais
 quota can be gone for the rest of the day. Like `_cooldowns` it lives in memory only - 30 s of state
 is not worth persisting across a restart. `check_overload` mirrors `check_quota` exactly: at the top
 of every attempt, and (through `check_available`) ahead of the download in `photos.on_photo`.
-When Groq is off or has failed too, the reply is `i18n.busy_notice`
+When Groq is off or has failed too, the reply is `busy_notice`
 (two messages, chosen by which model is busy), and its photo variant offers `/їжа <текст>` only when
 the text model is actually usable right now - not overloaded and not out of quota
 (`_is_vision_only_outage`, which the quota path shares for the same reason), because advice that
@@ -392,7 +433,7 @@ worth downloading the photo for. The weekly report benefits without any schedule
 failure was a 503 and the overload path suppressed it. The interactive call sites
 (`photos.on_photo`,
 `commands._record_food_text`, `corrections.on_text_correction`, `sport.record_sport`) pass
-`partial(message.reply, i18n.AI_RETRYING)`, so somebody waiting on a slow estimate is told the
+`partial(message.reply, i18n.t(lang).AI_RETRYING)`, so somebody waiting on a slow estimate is told the
 answer is late instead of staring at silence; the notice is left in the chat. Its wording names no
 cause, because the same notice covers a deadline, a 5xx and a dropped connection. A send that fails
 is
@@ -401,8 +442,8 @@ a background job and it already degrades to the numbers-only fallback.
 
 **Errors.** A global error handler logs the exception and replies with a short "не вийшло,
 спробуй ще" (it only fires when a handler matched, so the sender was always waiting). Two
-exceptions from `bot/ai.py` are special-cased: `QuotaExceeded` gets `i18n.quota_notice` and
-`ModelOverloaded` gets `i18n.busy_notice`, each with a WARNING-level log line naming the model and
+exceptions from `bot/ai.py` are special-cased: `QuotaExceeded` gets `quota_notice` and
+`ModelOverloaded` gets `busy_notice` (in the sender's language, see *Languages*), each with a WARNING-level log line naming the model and
 the cooldown instead of a traceback - a spent free-tier quota and a demand spike are expected,
 self-healing conditions, not bugs to hunt. With the Groq fallback on, either one only reaches the
 handler once Groq has failed too, so the handler needs no knowledge of Groq. The polling loop never dies
@@ -410,7 +451,8 @@ because of a handler.
 
 **Trailing columns.** `food.portion` (the portion size the model priced, shown on the `≈` line so
 the user can see what the calories were computed for), `sport.message_id` (the confirmation a
-delete replies to) and `users.birth_year` / `users.sex` (the profile for the weekly report) are
+delete replies to), `users.birth_year` / `users.sex` (the profile for the weekly report) and
+`users.lang` (the person's language) are
 the *last* entries of their `HEADERS` lists: an existing spreadsheet then only gains a trailing
 column instead of having every value shifted right.
 
@@ -433,13 +475,14 @@ because aiogram handles each update in its own task.
   so the AI only has to extract *what* and *how long*.
 - **Everything blocking runs off the event loop.** gspread via `asyncio.to_thread`, Gemini via
   `client.aio`, Groq via `AsyncGroq`.
-- **No emojis** in bot output; plain Ukrainian text with HTML only for mentions and `<code>`.
+- **No emojis** in bot output; plain Ukrainian or English text with HTML only for mentions and `<code>`.
 
 ## How to add a feature
 
 1. Put the parsing/decision logic in a pure function (`parsing.py`, `met.py`, `reports.py`) and
    write a test in `tests/` first - `tests/conftest.py` has an in-memory `FakeRepo`.
-2. Add the user-facing strings to `i18n.py`.
+2. Add the user-facing strings to both `bot/i18n/uk.py` and `bot/i18n/en.py` (same name, same
+   placeholders - `tests/test_i18n.py` fails otherwise) and reach them through `i18n.t(lang)`.
 3. If new data is stored, add a column at the end of the relevant tab in `sheets.HEADERS`, a
    repo method, the same method on `FakeRepo`, and update the README table.
 4. Add a handler module under `bot/handlers/` exposing `build() -> Router`, and include it in

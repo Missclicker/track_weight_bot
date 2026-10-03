@@ -1,35 +1,109 @@
-"""All user-facing strings (Ukrainian). Messages are sent with parse_mode=HTML, so every piece of
-user- or model-supplied text passed in here must already be HTML-escaped by the caller."""
+"""Ukrainian user-facing strings, the default language. Messages are sent with parse_mode=HTML, so
+every piece of user- or model-supplied text interpolated into a constant must be HTML-escaped by
+the caller (the helper functions below escape their own text arguments).
+
+`bot/i18n/en.py` mirrors this module name for name (tests/test_i18n.py checks the parity); the
+comments explaining why a text is worded the way it is live here, not there.
+"""
 
 from __future__ import annotations
 
 import math
 from html import escape
 
+from bot.i18n._common import FOOD_PREFIX, fmt_delta, fmt_kg
 from bot.parsing import WATER_ALL_DAYS, WATER_WEEKDAYS, WATER_WEEKEND, WaterSchedule
 
-FOOD_PREFIX = "≈"  # a reply to a message starting with this corrects, deletes or weighs in
-SPORT_PREFIX = "Спорт:"  # ... and replies to messages starting with this can delete the activity
+# Everything a language module exports; `en.py` exports exactly the same names.
+__all__ = [
+    "AI_BUSY",
+    "AI_BUSY_PHOTO",
+    "AI_QUOTA_DAY",
+    "AI_QUOTA_PHOTO_DAY",
+    "AI_QUOTA_PHOTO_SOON",
+    "AI_QUOTA_SOON",
+    "AI_RETRYING",
+    "CORRECTED_MARK",
+    "CORRECTION_NOT_FOUND",
+    "CORRECTION_NOT_UNDERSTOOD",
+    "CORRECTION_SAVED",
+    "DAY_TOTAL_DATE",
+    "DAY_TOTAL_TODAY",
+    "ERROR_TRY_AGAIN",
+    "FOOD_DELETED",
+    "FOOD_INPUT_PROMPT",
+    "FOOD_INPUT_PROMPT_PREFIX",
+    "FOOD_NOT_FOOD",
+    "HELP",
+    "KCAL_HEADER",
+    "KCAL_HEADER_YESTERDAY",
+    "KCAL_NO_DATA",
+    "KCAL_NO_DATA_YESTERDAY",
+    "KCAL_NO_TIME",
+    "LANG_CURRENT",
+    "LANG_NAME",
+    "LANG_SET",
+    "LANG_USAGE",
+    "PING",
+    "PING_PREFIX",
+    "PRIVATE_CHAT_ONLY_GROUP",
+    "PROFILE_CLEARED",
+    "PROFILE_CURRENT",
+    "PROFILE_NONE",
+    "PROFILE_SET",
+    "PROFILE_USAGE",
+    "PROMPT_CANCELLED",
+    "SPORT_DELETED",
+    "SPORT_INPUT_PROMPT",
+    "SPORT_INPUT_PROMPT_PREFIX",
+    "SPORT_NOT_FOUND_FOR_DELETE",
+    "SPORT_NOT_RECOGNIZED",
+    "SPORT_PREFIX",
+    "SPORT_SAVED",
+    "SPORT_SAVED_DATE",
+    "START_REGISTERED",
+    "TARGET_CLEARED",
+    "TARGET_CURRENT",
+    "TARGET_NONE",
+    "TARGET_SET",
+    "TARGET_USAGE",
+    "TODAY_HEADER",
+    "TODAY_NO_DATA",
+    "WATER_DM_READY",
+    "WATER_NEED_DM",
+    "WATER_NOT_SUBSCRIBED",
+    "WATER_PING",
+    "WATER_STATUS",
+    "WATER_STOPPED",
+    "WATER_SUBSCRIBED",
+    "WATER_SUBSCRIBED_DM",
+    "WATER_USAGE",
+    "WEEKLY_AI_FAILED",
+    "WEEKLY_HEADER",
+    "WEEKLY_NO_DATA",
+    "WEIGHT_FIRST",
+    "WEIGHT_OUT_OF_RANGE",
+    "WEIGHT_SAME",
+    "WEIGHT_USAGE",
+    "WEIGHT_WITH_DELTA",
+    "busy_notice",
+    "day_total",
+    "fmt_profile",
+    "fmt_water_schedule",
+    "food_estimate",
+    "kcal_today",
+    "quota_notice",
+    "sport_saved",
+    "today_summary",
+    "weekly_stats_block",
+]
+
+# Replies to bot messages starting with this can delete the activity. Like every other prefix in
+# here it must not collide with the English one: routing recognises a bot message by its text,
+# whichever language it was sent in (see `bot.i18n.SPORT_PREFIXES`).
+SPORT_PREFIX = "Спорт:"
 
 PRIVATE_CHAT_ONLY_GROUP = "Цей бот працює лише в груповому чаті."
-
-# Every command has three spellings: the short English one, a Latin transliteration of the
-# Ukrainian word (registrable in BotFather, which accepts only [a-z0-9_]) and the Cyrillic word
-# itself (Telegram clients do not autocomplete or highlight it, but the bot understands it when
-# typed). Keep README "/setcommands" block in sync with the first two.
-COMMANDS: dict[str, tuple[str, ...]] = {
-    "start": ("start", "старт"),
-    "help": ("help", "dovidka", "довідка", "допомога"),
-    "w": ("w", "vaga", "вага"),
-    "food": ("food", "yizha", "їжа"),
-    "sport": ("sport", "спорт"),
-    "today": ("today", "sohodni", "сьогодні"),
-    "kcal": ("kcal", "kalorii", "калорії"),
-    "target": ("target", "tsil", "ціль"),
-    "profile": ("profile", "profil", "профіль"),
-    "week": ("week", "tyzhden", "тиждень", "звіт"),
-    "water": ("water", "voda", "вода"),
-}
 
 HELP = (
     "Я записую їжу, вагу і спорт у спільну таблицю.\n\n"
@@ -50,6 +124,7 @@ HELP = (
     "(необов'язково; /профіль стоп - прибрати)\n"
     "/week або /тиждень - звіт за 7 останніх повних днів (без сьогодні)\n"
     "/water будні з 9 до 18 кожні 30 хв або /вода ... - нагадування пити воду в особисті\n"
+    "/lang en або /мова en - перейти на англійську (switch to English)\n"
     "/help або /довідка - ця довідка\n\n"
     "Оцінки з фото приблизні (±30-50 %). Щоб виправити - відповідай на оцінку числом ккал.\n"
     'Щоб прибрати запис про їжу чи активність - відповідай на нього "видали" або '
@@ -57,6 +132,13 @@ HELP = (
 )
 
 START_REGISTERED = "Записав тебе, {name}. Щоранку до {deadline} чекаю на вагу.\n\n" + HELP
+
+# `/lang`. The way to the other language is spelled in that language too: somebody who cannot
+# read this one must still find the way out of it. LANG_SET is sent in the language just chosen.
+LANG_NAME = "українська"
+LANG_CURRENT = "Мова: українська. Switch to English: /lang en"
+LANG_SET = "Готово, тепер відповідаю українською."
+LANG_USAGE = "Не знаю такої мови. Можна: /мова uk (українська) або /мова en (English)."
 
 ERROR_TRY_AGAIN = "Не вийшло, спробуй ще раз."
 # Sent once mid-call, when a Gemini attempt failed and a longer one is starting. Deliberately
@@ -256,15 +338,6 @@ PROFILE_NONE = (
 _SEX_NAMES = {"m": "чоловіча", "f": "жіноча"}
 
 
-def fmt_kg(value: float) -> str:
-    return f"{value:.1f}".rstrip("0").rstrip(".") if value != int(value) else f"{value:.0f}"
-
-
-def fmt_delta(value: float) -> str:
-    sign = "+" if value > 0 else "-"
-    return f"{sign}{abs(value):.1f}"
-
-
 def fmt_profile(
     birth_year: int | None, sex: str | None, height_cm: float | None, current_year: int
 ) -> str:
@@ -360,10 +433,6 @@ def sport_saved(
         kcal=f"{kcal:.0f}",
         date=date_str,
     )
-
-
-def mention(user_id: int, name: str) -> str:
-    return f'<a href="tg://user?id={user_id}">{escape(name)}</a>'
 
 
 def today_summary(

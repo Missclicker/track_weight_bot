@@ -165,7 +165,7 @@ def test_strict_schema_requires_every_food_field_and_keeps_the_bounds() -> None:
     assert properties["kcal"]["minimum"] == 0
     assert properties["kcal"]["maximum"] == 10_000
     assert properties["veg_share"]["maximum"] == 1
-    assert properties["dish"]["description"] == "Short dish name in Ukrainian"
+    assert properties["dish"]["description"] == FoodEstimate.model_fields["dish"].description
 
 
 def test_strict_schema_keeps_a_nullable_field_and_requires_it() -> None:

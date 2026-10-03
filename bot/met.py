@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from bot.i18n import normalize_lang
+
 DEFAULT_WEIGHT_KG = 80.0
 DEFAULT_MINUTES = 30.0
 
@@ -22,6 +24,9 @@ class Activity:
     met: float
     patterns: tuple[str, ...]  # regexes matched against lower-cased text
     min_per_km: float | None = None  # typical pace, used when only a distance is given
+    # English display name. Defaulted only so the ad-hoc fallback row in `estimate_kcal` can be
+    # built positionally; every row of ACTIVITIES spells one out (tests/test_met.py checks).
+    title_en: str = ""
 
 
 ACTIVITIES: dict[str, Activity] = {
@@ -40,6 +45,7 @@ ACTIVITIES: dict[str, Activity] = {
                 r"\bran\b",
             ),
             min_per_km=6.0,
+            title_en="running",
         ),
         Activity(
             "walking",
@@ -58,6 +64,7 @@ ACTIVITIES: dict[str, Activity] = {
                 r"\bhik\w*",
             ),
             min_per_km=12.0,
+            title_en="walking",
         ),
         Activity(
             "cycling",
@@ -65,6 +72,7 @@ ACTIVITIES: dict[str, Activity] = {
             7.5,
             (r"\bвело\w*", r"\bвелик\b", r"\bbike\b", r"\bbicycl\w*", r"\bcycl\w*"),
             min_per_km=3.0,
+            title_en="cycling",
         ),
         Activity(
             "swimming",
@@ -73,6 +81,7 @@ ACTIVITIES: dict[str, Activity] = {
             # not bare "плав\w*": "плавно" is an adverb
             (r"\bплава\w*", r"\bпоплав\w*", r"\bбасейн\w*", r"\bswim\w*", r"\bswam\b"),
             min_per_km=25.0,
+            title_en="swimming",
         ),
         Activity(
             "gym",
@@ -94,6 +103,7 @@ ACTIVITIES: dict[str, Activity] = {
                 r"\blifting\b",
                 r"\bstrength training\b",
             ),
+            title_en="gym / strength",
         ),
         Activity(
             "cardio",
@@ -107,6 +117,7 @@ ACTIVITIES: dict[str, Activity] = {
                 r"\bскакалк\w*",
                 r"\bjump rope\b",
             ),
+            title_en="cardio",
         ),
         Activity(
             "yoga",
@@ -120,20 +131,46 @@ ACTIVITIES: dict[str, Activity] = {
                 r"\bрозтяж\w*",
                 r"\bstretch\w*",
             ),
+            title_en="yoga / stretching",
         ),
-        Activity("football", "футбол", 7.0, (r"\bфутбол\w*", r"\bfootball\b", r"\bsoccer\b")),
+        Activity(
+            "football",
+            "футбол",
+            7.0,
+            (r"\bфутбол\w*", r"\bfootball\b", r"\bsoccer\b"),
+            title_en="football",
+        ),
         Activity(
             "tennis",
             "теніс",
             7.3,
             (r"\bтеніс\w*", r"\btennis\b", r"\bбадмінтон\w*", r"\bпінг-?понг\w*", r"\bсквош\w*"),
+            title_en="tennis",
         ),
-        Activity("basketball", "баскетбол", 6.5, (r"\bбаскетбол\w*", r"\bbasketball\b")),
-        Activity("volleyball", "волейбол", 4.0, (r"\bволейбол\w*", r"\bvolleyball\b")),
-        Activity("dancing", "танці", 5.0, (r"\bтанц\w*", r"\bdanc\w*")),
-        Activity("skiing", "лижі", 7.0, (r"\bлиж\w*", r"\bski(?:ing|ed|s)?\b")),
-        Activity("skating", "ковзани / ролики", 7.0, (r"\bковзан\w*", r"\bролик\w*", r"\bskat\w*")),
-        Activity("rowing", "гребля", 7.0, (r"\bгребл\w*", r"\brow(?:ing|ed)\b")),
+        Activity(
+            "basketball",
+            "баскетбол",
+            6.5,
+            (r"\bбаскетбол\w*", r"\bbasketball\b"),
+            title_en="basketball",
+        ),
+        Activity(
+            "volleyball",
+            "волейбол",
+            4.0,
+            (r"\bволейбол\w*", r"\bvolleyball\b"),
+            title_en="volleyball",
+        ),
+        Activity("dancing", "танці", 5.0, (r"\bтанц\w*", r"\bdanc\w*"), title_en="dancing"),
+        Activity("skiing", "лижі", 7.0, (r"\bлиж\w*", r"\bski(?:ing|ed|s)?\b"), title_en="skiing"),
+        Activity(
+            "skating",
+            "ковзани / ролики",
+            7.0,
+            (r"\bковзан\w*", r"\bролик\w*", r"\bskat\w*"),
+            title_en="skating / rollerblading",
+        ),
+        Activity("rowing", "гребля", 7.0, (r"\bгребл\w*", r"\brow(?:ing|ed)\b"), title_en="rowing"),
     )
 }
 
@@ -151,6 +188,17 @@ def find_activity(text: str) -> Activity | None:
         if pattern.search(lowered):
             return activity
     return None
+
+
+def activity_title(key: str, lang: object) -> str:
+    """Display name of the activity `key` in `lang` (Ukrainian unless it is English); an unknown
+    key - a hand-typed or retired `sport.activity` cell - is shown as it is."""
+    activity = ACTIVITIES.get(key)
+    if activity is None:
+        return key
+    if normalize_lang(lang) == "en":
+        return activity.title_en or key
+    return activity.title
 
 
 def kcal_burned(met: float, weight_kg: float, minutes: float) -> float:

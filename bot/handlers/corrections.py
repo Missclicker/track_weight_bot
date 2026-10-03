@@ -21,6 +21,7 @@ from bot.ai import GeminiClient
 from bot.config import Settings
 from bot.handlers import ensure_user
 from bot.handlers.weight import weigh_in
+from bot.i18n import Lang
 from bot.parsing import is_food_cancel_request, parse_correction
 from bot.reports import day_food
 from bot.scheduler import user_now
@@ -72,43 +73,52 @@ class CorrectionReply(BaseFilter):
 
 
 async def _day_total_line(
-    repo: SheetsRepo, settings: Settings, user: User, entry_date: str, kcal_delta: float = 0
+    repo: SheetsRepo,
+    settings: Settings,
+    user: User,
+    entry_date: str,
+    lang: Lang,
+    kcal_delta: float = 0,
 ) -> str:
     """Total for the day the corrected entry belongs to. `kcal_delta` accounts for an update
     that is written only after the reply is sent."""
     today = user_now(user, settings).date()
     day = date.fromisoformat(entry_date) if entry_date else today
     total = (await day_food(repo, user.user_id, day)).total_kcal + kcal_delta
-    return i18n.day_total(total, user.daily_kcal_target, None if day == today else day.isoformat())
+    return i18n.t(lang).day_total(
+        total, user.daily_kcal_target, None if day == today else day.isoformat()
+    )
 
 
 async def on_correction(
-    message: Message, kcal: float, repo: SheetsRepo, settings: Settings
+    message: Message, kcal: float, repo: SheetsRepo, settings: Settings, lang: Lang
 ) -> None:
     assert message.reply_to_message is not None and message.from_user is not None
+    strings = i18n.t(lang)
     original_id = message.reply_to_message.message_id
     # scoped to the sender: only the author of a food entry can correct it
     entry = await repo.get_food_entry(message.from_user.id, original_id)
     if entry is None or not await repo.update_food_kcal(message.from_user.id, original_id, kcal):
-        await message.reply(i18n.CORRECTION_NOT_FOUND)
+        await message.reply(strings.CORRECTION_NOT_FOUND)
         return
     user = await ensure_user(message, repo, settings)
-    total_line = await _day_total_line(repo, settings, user, str(entry.get("date", "")))
-    saved = i18n.CORRECTION_SAVED.format(kcal=f"{kcal:.0f}")
+    total_line = await _day_total_line(repo, settings, user, str(entry.get("date", "")), lang)
+    saved = strings.CORRECTION_SAVED.format(kcal=f"{kcal:.0f}")
     await message.reply(f"{saved} {total_line}")
 
 
-async def on_delete(message: Message, repo: SheetsRepo, settings: Settings) -> None:
+async def on_delete(message: Message, repo: SheetsRepo, settings: Settings, lang: Lang) -> None:
     assert message.reply_to_message is not None and message.from_user is not None
+    strings = i18n.t(lang)
     # scoped to the sender, like every other branch here: only the author may delete an entry
     entry = await repo.delete_food_entry(message.from_user.id, message.reply_to_message.message_id)
     if entry is None:
-        await message.reply(i18n.CORRECTION_NOT_FOUND)
+        await message.reply(strings.CORRECTION_NOT_FOUND)
         return
     user = await ensure_user(message, repo, settings)
     # the row is already gone, so the total read back here needs no delta
-    total_line = await _day_total_line(repo, settings, user, str(entry.get("date", "")))
-    await message.reply(f"{i18n.FOOD_DELETED} {total_line}")
+    total_line = await _day_total_line(repo, settings, user, str(entry.get("date", "")), lang)
+    await message.reply(f"{strings.FOOD_DELETED} {total_line}")
 
 
 async def on_text_correction(
@@ -117,26 +127,28 @@ async def on_text_correction(
     repo: SheetsRepo,
     ai: GeminiClient,
     settings: Settings,
+    lang: Lang,
 ) -> None:
     assert message.reply_to_message is not None and message.from_user is not None
+    strings = i18n.t(lang)
     original_id = message.reply_to_message.message_id
     entry = await repo.get_food_entry(message.from_user.id, original_id)
     if entry is None:
-        await message.reply(i18n.CORRECTION_NOT_FOUND)
+        await message.reply(strings.CORRECTION_NOT_FOUND)
         return
     est = await ai.revise_food(
-        entry, correction_text, on_retry=partial(message.reply, i18n.AI_RETRYING)
+        entry, correction_text, on_retry=partial(message.reply, strings.AI_RETRYING), lang=lang
     )
     if not est.is_food:
-        await message.reply(i18n.CORRECTION_NOT_UNDERSTOOD)
+        await message.reply(strings.CORRECTION_NOT_UNDERSTOOD)
         return
     user = await ensure_user(message, repo, settings)
     # the row is rewritten only after the reply, so swap the old kcal for the new one here
     total_line = await _day_total_line(
-        repo, settings, user, str(entry.get("date", "")), est.kcal - float(entry["kcal"])
+        repo, settings, user, str(entry.get("date", "")), lang, est.kcal - float(entry["kcal"])
     )
     reply = await message.reply(
-        i18n.food_estimate(
+        strings.food_estimate(
             est.dish,
             est.kcal,
             est.alcohol_kcal,

@@ -92,6 +92,7 @@ class FakeAI:
         self.revise_calls: list[tuple[str, str]] = []
         self.estimate_calls: list[str | None] = []  # the caption of every estimate_food call
         self.food_estimates: list[FoodEstimate] = []  # answers for estimate_food, in order
+        self.langs: list[str] = []  # the `lang` every AI call was made with, in order
         self.cooling: dict[str, tuple[float, bool]] = {}  # model -> (seconds left, per-day)
         self.overloaded: dict[str, float] = {}  # model -> seconds left of the 503 cooldown
         # a configured Groq fallback: outages are answered instead of raised
@@ -132,18 +133,22 @@ class FakeAI:
 
     # `on_retry` is never invoked here - the retry loop itself is covered by `test_ai_retry.py`
     # and, end to end, by `test_food_estimate_warns_the_user_before_retrying` below. These fakes
-    # only have to accept the keyword the handlers now pass.
+    # only have to accept the keyword the handlers now pass. `lang` has no default, unlike the
+    # real client's, so a handler that forgets to pass the sender's language fails loudly here.
     async def estimate_food(
         self,
         image_bytes: bytes | None,
         mime: str | None,
         caption: str | None,
         on_retry: RetryNotice | None = None,
+        *,
+        lang: str,
     ) -> FoodEstimate:
         # the real client runs both checks inside `_generate`, for whichever model it picks
         model = self.vision_model if image_bytes is not None else self.text_model
         self._check_call(model)
         self.estimate_calls.append(caption)
+        self.langs.append(lang)
         return self.food_estimates.pop(0)
 
     async def revise_food(
@@ -151,17 +156,27 @@ class FakeAI:
         previous: dict[str, Any],
         correction: str,
         on_retry: RetryNotice | None = None,
+        *,
+        lang: str,
     ) -> FoodEstimate:
         self._check_call(self.text_model)
         self.revise_calls.append((str(previous["dish"]), correction))
+        self.langs.append(lang)
         return FoodEstimate(dish="борщ з хлібом", kcal=720, carbs_g=60)
 
     async def parse_sport(
-        self, text: str, weight_kg: float | None, on_retry: RetryNotice | None = None
+        self,
+        text: str,
+        weight_kg: float | None,
+        on_retry: RetryNotice | None = None,
+        *,
+        lang: str,
     ) -> SportEntry | None:
         self._check_call(self.text_model)
         self.sport_calls.append(text)
-        return SportEntry(activity="running", title="біг", minutes=30, distance_km=5, kcal=390)
+        self.langs.append(lang)
+        title = "running" if lang == "en" else "біг"
+        return SportEntry(activity="running", title=title, minutes=30, distance_km=5, kcal=390)
 
 
 class FakeJobs:
@@ -243,7 +258,7 @@ async def test_bare_number_is_weight(harness, repo: FakeRepo, monkeypatch) -> No
     assert len(repo.rows["weight"]) == 1
     assert repo.rows["weight"][0]["kg"] == 84.3
     assert repo.rows["weight"][0]["source"] == "text"
-    assert session.sent[-1]["text"] == i18n.WEIGHT_FIRST.format(kg="84.3")
+    assert session.sent[-1]["text"] == i18n.uk.WEIGHT_FIRST.format(kg="84.3")
     assert len(repo.users) == 1  # auto-registered
 
     await dp.feed_update(bot, _update("83.8", message_id=2))
@@ -257,7 +272,7 @@ async def test_a_number_replying_to_us_is_a_weigh_in_replying_to_a_person_is_not
     the morning ping only differs in the `source` it is stored under. A reply to another member is
     conversation and stays ignored."""
     dp, bot, _, _ = harness
-    ping = _bot_message(i18n.PING.format(mentions="x"), 500)
+    ping = _bot_message(i18n.uk.PING.format(mentions="x"), 500)
     await dp.feed_update(bot, _update("85", reply_to=ping))
     assert repo.rows["weight"][0]["source"] == "ping"
 
@@ -307,7 +322,7 @@ async def test_correction_of_someone_elses_entry_is_refused(harness, repo: FakeR
     food_msg = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 778)
     await dp.feed_update(bot, _update("100", reply_to=food_msg))
     assert repo.rows["food"][0]["kcal"] == 600
-    assert i18n.CORRECTION_NOT_FOUND in session.sent[-1]["text"]
+    assert i18n.uk.CORRECTION_NOT_FOUND in session.sent[-1]["text"]
 
 
 async def test_text_reply_to_food_estimate_revises_via_ai(harness, repo: FakeRepo) -> None:
@@ -323,7 +338,7 @@ async def test_text_reply_to_food_estimate_revises_via_ai(harness, repo: FakeRep
     assert (row["dish"], row["kcal"], row["corrected"]) == ("борщ з хлібом", 720, "TRUE")
     reply = session.sent[-1]
     assert reply["text"].startswith(i18n.FOOD_PREFIX) and "720" in reply["text"]
-    assert i18n.CORRECTED_MARK in reply["text"]
+    assert i18n.uk.CORRECTED_MARK in reply["text"]
     assert row["message_id"] == 1001  # re-keyed to the bot's new reply (MockSession ids)
 
     # ... so the next correction replies to the new estimate
@@ -338,7 +353,7 @@ async def test_text_reply_to_someone_elses_estimate_is_refused(harness, repo: Fa
     food_msg = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 778)
     await dp.feed_update(bot, _update("це було 300 г", reply_to=food_msg))
     assert ai.revise_calls == []
-    assert session.sent[-1]["text"] == i18n.CORRECTION_NOT_FOUND
+    assert session.sent[-1]["text"] == i18n.uk.CORRECTION_NOT_FOUND
 
 
 async def test_sport_text_is_ignored(harness, repo: FakeRepo) -> None:
@@ -375,7 +390,7 @@ async def test_other_chat_is_dropped(harness, repo: FakeRepo) -> None:
 async def test_private_start_explains(harness) -> None:
     dp, bot, session, _ = harness
     await dp.feed_update(bot, _update("/start", chat_id=ME, chat_type="private"))
-    assert session.sent[-1]["text"] == i18n.PRIVATE_CHAT_ONLY_GROUP
+    assert session.sent[-1]["text"] == i18n.uk.PRIVATE_CHAT_ONLY_GROUP
     await dp.feed_update(bot, _update("84.3", chat_id=ME, chat_type="private", message_id=2))
     assert len(session.sent) == 1
 
@@ -390,7 +405,7 @@ async def test_allow_listed_private_chat_is_served(settings: Settings, repo: Fak
     dp.include_router(build_router())
 
     await dp.feed_update(bot, _update("/start", chat_id=ME, chat_type="private"))
-    assert session.sent[-1]["text"] != i18n.PRIVATE_CHAT_ONLY_GROUP
+    assert session.sent[-1]["text"] != i18n.uk.PRIVATE_CHAT_ONLY_GROUP
     assert len(repo.users) == 1  # registered by cmd_start
     await dp.feed_update(bot, _update("84.3", chat_id=ME, chat_type="private", message_id=2))
     assert repo.rows["weight"][0]["kg"] == 84.3
@@ -416,7 +431,7 @@ async def test_ukrainian_and_transliterated_command_aliases(harness, repo: FakeR
     await dp.feed_update(bot, _update("/спорт біг 5 км", message_id=4))
     assert ai.sport_calls == ["біг 5 км"]
     await dp.feed_update(bot, _update("/довідка", message_id=5))
-    assert session.sent[-1]["text"] == i18n.HELP
+    assert session.sent[-1]["text"] == i18n.uk.HELP
     await dp.feed_update(bot, _update("/старт", message_id=6))
     assert "Записав тебе" in session.sent[-1]["text"]
     # a bare Cyrillic "command" the bot does not know is left alone
@@ -460,30 +475,30 @@ async def test_water_needs_the_private_chat_first(harness, repo: FakeRepo) -> No
 async def test_water_status_stop_and_usage(harness, repo: FakeRepo) -> None:
     dp, bot, session, _ = harness
     await dp.feed_update(bot, _update("/вода"))
-    assert session.sent[-1]["text"] == i18n.WATER_USAGE
+    assert session.sent[-1]["text"] == i18n.uk.WATER_USAGE
     await dp.feed_update(bot, _update("/вода колись і як-небудь", message_id=2))
-    assert session.sent[-1]["text"] == i18n.WATER_USAGE
+    assert session.sent[-1]["text"] == i18n.uk.WATER_USAGE
     await dp.feed_update(bot, _update("/вода стоп", message_id=3))
-    assert session.sent[-1]["text"] == i18n.WATER_NOT_SUBSCRIBED
+    assert session.sent[-1]["text"] == i18n.uk.WATER_NOT_SUBSCRIBED
 
     await dp.feed_update(bot, _update("/voda щодня кожну годину", message_id=4))
     await dp.feed_update(bot, _update("/вода", message_id=5))
-    assert session.sent[-1]["text"] == i18n.WATER_STATUS.format(
+    assert session.sent[-1]["text"] == i18n.uk.WATER_STATUS.format(
         schedule="щодня, 09:00-21:00, кожну годину", tz="Europe/Kyiv"
     )
 
     await dp.feed_update(bot, _update("/вода стоп", message_id=6))
-    assert session.sent[-1]["text"] == i18n.WATER_STOPPED
+    assert session.sent[-1]["text"] == i18n.uk.WATER_STOPPED
     assert repo.rows["water"][0]["active"] == "FALSE"
     await dp.feed_update(bot, _update("/вода", message_id=7))
-    assert session.sent[-1]["text"] == i18n.WATER_USAGE
+    assert session.sent[-1]["text"] == i18n.uk.WATER_USAGE
 
 
 async def test_water_in_a_private_chat_only_for_members(harness, repo: FakeRepo) -> None:
     dp, bot, session, _ = harness
     dm = {"chat_id": ME, "chat_type": "private"}
     await dp.feed_update(bot, _update("/вода щодня кожну годину", **dm))
-    assert session.sent[-1]["text"] == i18n.PRIVATE_CHAT_ONLY_GROUP
+    assert session.sent[-1]["text"] == i18n.uk.PRIVATE_CHAT_ONLY_GROUP
     assert repo.rows["water"] == [] and len(repo.users) == 0  # a DM never registers anybody
 
     await repo.upsert_user(User(user_id=ME, chat_id=CHAT_ID, name="Олексій", tz="Europe/Kyiv"))
@@ -497,7 +512,7 @@ async def test_private_start_greets_a_member(harness, repo: FakeRepo) -> None:
     dp, bot, session, _ = harness
     await repo.upsert_user(User(user_id=ME, chat_id=CHAT_ID, name="Олексій"))
     await dp.feed_update(bot, _update("/start", chat_id=ME, chat_type="private"))
-    assert session.sent[-1]["text"] == i18n.WATER_DM_READY
+    assert session.sent[-1]["text"] == i18n.uk.WATER_DM_READY
 
 
 async def test_handler_error_is_reported_not_raised(harness, repo: FakeRepo) -> None:
@@ -508,12 +523,12 @@ async def test_handler_error_is_reported_not_raised(harness, repo: FakeRepo) -> 
 
     ai.parse_sport = boom  # type: ignore[method-assign]
     await dp.feed_update(bot, _update("/sport біг 30 хв"))
-    assert session.sent[-1]["text"] == i18n.ERROR_TRY_AGAIN
+    assert session.sent[-1]["text"] == i18n.uk.ERROR_TRY_AGAIN
 
 
 @pytest.mark.parametrize(
     ("daily", "expected"),
-    [(True, i18n.AI_QUOTA_PHOTO_DAY), (False, i18n.AI_QUOTA_PHOTO_SOON)],
+    [(True, i18n.uk.AI_QUOTA_PHOTO_DAY), (False, i18n.uk.AI_QUOTA_PHOTO_SOON)],
 )
 async def test_a_photo_is_refused_while_the_vision_quota_is_spent(
     harness, repo: FakeRepo, daily: bool, expected: str
@@ -535,7 +550,7 @@ async def test_a_photo_is_refused_while_the_vision_model_is_overloaded(
     dp, bot, session, ai = harness
     ai.overloaded[ai.vision_model] = 30.0
     await dp.feed_update(bot, _photo_update(caption="борщ"))
-    assert session.sent[-1]["text"] == i18n.AI_BUSY_PHOTO
+    assert session.sent[-1]["text"] == i18n.uk.AI_BUSY_PHOTO
     assert ai.estimate_calls == []
     assert repo.rows["food"] == []
 
@@ -578,7 +593,7 @@ async def test_a_correction_is_refused_while_the_text_quota_is_spent(
     ai.cooling[ai.text_model] = (7200.0, True)
 
     await dp.feed_update(bot, _update("це було 300 г", reply_to=borsch))
-    assert session.sent[-1]["text"] == i18n.AI_QUOTA_DAY
+    assert session.sent[-1]["text"] == i18n.uk.AI_QUOTA_DAY
     assert ai.revise_calls == []
     row = repo.rows["food"][0]
     assert (row["dish"], row["kcal"], row["corrected"]) == ("борщ", 600, "FALSE")
@@ -596,8 +611,8 @@ async def test_food_estimate_warns_the_user_before_retrying(
 
     assert models.calls == 2
     texts = [m["text"] for m in session.sent]
-    assert texts[0] == i18n.AI_RETRYING  # said once, before the estimate itself
-    assert texts.count(i18n.AI_RETRYING) == 1
+    assert texts[0] == i18n.uk.AI_RETRYING  # said once, before the estimate itself
+    assert texts.count(i18n.uk.AI_RETRYING) == 1
     assert texts[-1].startswith(i18n.FOOD_PREFIX + " 500")
     assert repo.rows["food"][0]["kcal"] == 500
 
@@ -613,12 +628,12 @@ async def test_food_command_reports_running_day_total(
     await dp.feed_update(bot, _update("/food омлет"))
     first = session.sent[-1]["text"]
     assert first.startswith(i18n.FOOD_PREFIX + " 500")
-    assert i18n.day_total(500, None) in first
+    assert i18n.uk.day_total(500, None) in first
 
     await dp.feed_update(bot, _update("/їжа гомілки", message_id=2))
     second = session.sent[-1]["text"]
-    assert i18n.day_total(1130, None) in second
-    assert second.index(i18n.day_total(1130, None)) < second.index("Щоб виправити")
+    assert i18n.uk.day_total(1130, None) in second
+    assert second.index(i18n.uk.day_total(1130, None)) < second.index("Щоб виправити")
     assert [r["kcal"] for r in repo.rows["food"]] == [500, 630]
     assert "Разом за сьогодні: 1130 ккал." in second
 
@@ -638,7 +653,7 @@ async def test_bare_food_command_asks_for_the_text(harness, repo: FakeRepo) -> N
     ai.food_estimates = [unused]
     for message_id, command in enumerate(("/food", "/їжа", "/yizha"), start=1):
         await dp.feed_update(bot, _update(command, message_id=message_id))
-        assert session.sent[-1]["text"] == i18n.FOOD_INPUT_PROMPT
+        assert session.sent[-1]["text"] == i18n.uk.FOOD_INPUT_PROMPT
         assert session.sent[-1]["reply_markup"]["force_reply"] is True
     assert ai.food_estimates == [unused]  # nothing was asked of Gemini ...
     assert repo.rows["food"] == []  # ... and nothing was stored
@@ -647,7 +662,7 @@ async def test_bare_food_command_asks_for_the_text(harness, repo: FakeRepo) -> N
 async def test_reply_to_the_food_prompt_is_recorded(harness, repo: FakeRepo) -> None:
     dp, bot, session, ai = harness
     ai.food_estimates = [FoodEstimate(dish="борщ", kcal=500)]
-    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    prompt = _bot_message(i18n.uk.FOOD_INPUT_PROMPT, 1001)
     await dp.feed_update(bot, _update("борщ і два шматки хліба", reply_to=prompt))
 
     row = repo.rows["food"][0]
@@ -655,7 +670,7 @@ async def test_reply_to_the_food_prompt_is_recorded(harness, repo: FakeRepo) -> 
     assert row["user_id"] == ME
     reply = session.sent[-1]["text"]
     assert reply.startswith(i18n.FOOD_PREFIX + " 500")
-    assert i18n.day_total(500, None) in reply
+    assert i18n.uk.day_total(500, None) in reply
 
 
 async def test_a_user_cannot_fake_the_food_prompt(harness, repo: FakeRepo) -> None:
@@ -663,7 +678,7 @@ async def test_a_user_cannot_fake_the_food_prompt(harness, repo: FakeRepo) -> No
     dp, bot, session, ai = harness
     unused = FoodEstimate(dish="омлет", kcal=500)
     ai.food_estimates = [unused]
-    faked = _update(i18n.FOOD_INPUT_PROMPT, message_id=900).message
+    faked = _update(i18n.uk.FOOD_INPUT_PROMPT, message_id=900).message
     await dp.feed_update(bot, _update("борщ", reply_to=faked))
     assert session.sent == [] and ai.food_estimates == [unused] and repo.rows["food"] == []
 
@@ -672,7 +687,7 @@ async def test_a_number_answering_the_food_prompt_is_food_not_a_weigh_in(harness
     """`commands` is the first router inside `guarded`, so it wins over `weight`."""
     dp, bot, _, ai = harness
     ai.food_estimates = [FoodEstimate(dish="сто грам сиру", kcal=250)]
-    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    prompt = _bot_message(i18n.uk.FOOD_INPUT_PROMPT, 1001)
     await dp.feed_update(bot, _update("100", reply_to=prompt))
     assert repo.rows["weight"] == []
     assert repo.rows["food"][0]["source"] == "prompt"
@@ -681,7 +696,7 @@ async def test_a_number_answering_the_food_prompt_is_food_not_a_weigh_in(harness
 async def test_bare_sport_command_asks_for_the_text(harness, repo: FakeRepo) -> None:
     dp, bot, session, ai = harness
     await dp.feed_update(bot, _update("/sport"))
-    assert session.sent[-1]["text"] == i18n.SPORT_INPUT_PROMPT
+    assert session.sent[-1]["text"] == i18n.uk.SPORT_INPUT_PROMPT
     assert session.sent[-1]["reply_markup"]["force_reply"] is True
     assert ai.sport_calls == []
     assert repo.rows["sport"] == []
@@ -689,7 +704,7 @@ async def test_bare_sport_command_asks_for_the_text(harness, repo: FakeRepo) -> 
 
 async def test_reply_to_the_sport_prompt_is_recorded(harness, repo: FakeRepo) -> None:
     dp, bot, session, ai = harness
-    prompt = _bot_message(i18n.SPORT_INPUT_PROMPT, 1001)
+    prompt = _bot_message(i18n.uk.SPORT_INPUT_PROMPT, 1001)
     await dp.feed_update(bot, _update("біг 5 км 30 хв", reply_to=prompt))
     assert ai.sport_calls == ["біг 5 км 30 хв"]
     row = repo.rows["sport"][0]
@@ -700,7 +715,7 @@ async def test_reply_to_the_sport_prompt_is_recorded(harness, repo: FakeRepo) ->
 async def test_kcal_command_lists_today(harness, repo: FakeRepo, settings: Settings) -> None:
     dp, bot, session, _ = harness
     await dp.feed_update(bot, _update("/kcal"))
-    assert i18n.KCAL_NO_DATA in session.sent[-1]["text"]
+    assert i18n.uk.KCAL_NO_DATA in session.sent[-1]["text"]
 
     me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій", daily_kcal_target=2000)
     await repo.upsert_user(me)
@@ -726,14 +741,14 @@ async def test_kcal_yesterday_lists_the_previous_day(
     await repo.upsert_user(me)
     now = user_now(me, settings)
     await dp.feed_update(bot, _update("/калорії вчора"))
-    assert i18n.KCAL_NO_DATA_YESTERDAY in session.sent[-1]["text"]
+    assert i18n.uk.KCAL_NO_DATA_YESTERDAY in session.sent[-1]["text"]
 
     await repo.add_food(me, FoodEstimate(dish="сьогодні", kcal=500), now, "text", 10)
     await repo.add_food(me, FoodEstimate(dish="млинці", kcal=630), now - timedelta(days=1), "x", 11)
     await dp.feed_update(bot, _update("/kcal вчора", message_id=2))
     text = session.sent[-1]["text"]
     day = (now - timedelta(days=1)).date().isoformat()
-    assert text.startswith(i18n.KCAL_HEADER_YESTERDAY.format(name="Олексій", date=day))
+    assert text.startswith(i18n.uk.KCAL_HEADER_YESTERDAY.format(name="Олексій", date=day))
     assert "630 ккал - млинці" in text
     assert "500" not in text
     assert text.endswith("Разом: 630 ккал.")
@@ -750,11 +765,11 @@ async def test_corrections_report_the_day_total(harness, repo: FakeRepo, setting
 
     # a number: the row is updated first, then the total is read back
     await dp.feed_update(bot, _update("450", reply_to=borsch))
-    assert session.sent[-1]["text"] == "Виправив: 450 ккал. " + i18n.day_total(950, 2000)
+    assert session.sent[-1]["text"] == "Виправив: 450 ккал. " + i18n.uk.day_total(950, 2000)
 
     # text: FakeAI re-estimates to 720, replacing the 450
     await dp.feed_update(bot, _update("з хлібом", reply_to=borsch, message_id=2))
-    assert i18n.day_total(1220, 2000) in session.sent[-1]["text"]
+    assert i18n.uk.day_total(1220, 2000) in session.sent[-1]["text"]
     assert repo.rows["food"][1]["kcal"] == 720
 
     # an entry from another day is totalled for that day, not for today
@@ -762,21 +777,21 @@ async def test_corrections_report_the_day_total(harness, repo: FakeRepo, setting
     await repo.add_food(me, FoodEstimate(dish="піца", kcal=1000), old, "text", 12)
     pizza = _bot_message(i18n.FOOD_PREFIX + " 1000 ккал - піца", 12)
     await dp.feed_update(bot, _update("800", reply_to=pizza, message_id=3))
-    assert i18n.day_total(800, 2000, old.date().isoformat()) in session.sent[-1]["text"]
+    assert i18n.uk.day_total(800, 2000, old.date().isoformat()) in session.sent[-1]["text"]
 
 
 async def test_target_command_sets_shows_and_clears(harness, repo: FakeRepo, settings) -> None:
     dp, bot, session, ai = harness
     await dp.feed_update(bot, _update("/ціль"))
-    assert session.sent[-1]["text"] == i18n.TARGET_NONE  # auto-registered, no target yet
+    assert session.sent[-1]["text"] == i18n.uk.TARGET_NONE  # auto-registered, no target yet
 
     await dp.feed_update(bot, _update("/target 2 000 ккал", message_id=2))
-    assert session.sent[-1]["text"] == i18n.TARGET_SET.format(kcal="2000")
+    assert session.sent[-1]["text"] == i18n.uk.TARGET_SET.format(kcal="2000")
     me = await repo.get_user(ME, CHAT_ID)
     assert me is not None and me.daily_kcal_target == 2000
 
     await dp.feed_update(bot, _update("/tsil", message_id=3))
-    assert session.sent[-1]["text"] == i18n.TARGET_CURRENT.format(kcal="2000")
+    assert session.sent[-1]["text"] == i18n.uk.TARGET_CURRENT.format(kcal="2000")
 
     # the target now shows up next to the totals ...
     ai.food_estimates = [FoodEstimate(dish="омлет", kcal=500)]
@@ -793,7 +808,7 @@ async def test_target_command_sets_shows_and_clears(harness, repo: FakeRepo, set
 
     # ... and disappears completely once cleared: no "(ціль ...)" anywhere
     await dp.feed_update(bot, _update("/ціль стоп", message_id=8))
-    assert session.sent[-1]["text"] == i18n.TARGET_CLEARED
+    assert session.sent[-1]["text"] == i18n.uk.TARGET_CLEARED
     assert (await repo.get_user(ME, CHAT_ID)).daily_kcal_target is None
     await dp.feed_update(bot, _update("/kcal", message_id=9))
     assert "ціль" not in session.sent[-1]["text"]
@@ -812,7 +827,7 @@ async def test_profile_command_sets_shows_changes_and_clears(
         return me.birth_year, me.sex, me.height_cm
 
     await dp.feed_update(bot, _update("/профіль"))
-    assert session.sent[-1]["text"] == i18n.PROFILE_NONE  # auto-registered, nothing set yet
+    assert session.sent[-1]["text"] == i18n.uk.PROFILE_NONE  # auto-registered, nothing set yet
     me = await repo.get_user(ME, CHAT_ID)
     assert me is not None
     year = user_now(me, settings).year
@@ -820,16 +835,16 @@ async def test_profile_command_sets_shows_changes_and_clears(
     await dp.feed_update(bot, _update("/profile 1981 ч 180", message_id=2))
     assert await profile() == (1981, "m", 180)
     stored = f"рік народження 1981 ({year - 1981} р.), стать чоловіча, зріст 180 см"
-    assert session.sent[-1]["text"] == i18n.PROFILE_SET.format(profile=stored)
+    assert session.sent[-1]["text"] == i18n.uk.PROFILE_SET.format(profile=stored)
 
     await dp.feed_update(bot, _update("/профіль", message_id=3))
-    assert session.sent[-1]["text"] == i18n.PROFILE_CURRENT.format(profile=stored)
+    assert session.sent[-1]["text"] == i18n.uk.PROFILE_CURRENT.format(profile=stored)
 
     # an age alone moves the birth year and keeps what the message did not mention
     await dp.feed_update(bot, _update("/profile 45", message_id=4))
     assert await profile() == (year - 45, "m", 180)
     changed = f"рік народження {year - 45} (45 р.), стать чоловіча, зріст 180 см"
-    assert session.sent[-1]["text"] == i18n.PROFILE_SET.format(profile=changed)
+    assert session.sent[-1]["text"] == i18n.uk.PROFILE_SET.format(profile=changed)
 
     # a message that does not parse stores nothing - not even the part of it that would
     await dp.feed_update(bot, _update("/profile абв", message_id=5))
@@ -841,10 +856,10 @@ async def test_profile_command_sets_shows_changes_and_clears(
     assert await profile() == (year - 45, "m", 180)
 
     await dp.feed_update(bot, _update("/profile стоп", message_id=7))
-    assert session.sent[-1]["text"] == i18n.PROFILE_CLEARED
+    assert session.sent[-1]["text"] == i18n.uk.PROFILE_CLEARED
     assert await profile() == (None, None, None)
     await dp.feed_update(bot, _update("/профіль", message_id=8))
-    assert session.sent[-1]["text"] == i18n.PROFILE_NONE
+    assert session.sent[-1]["text"] == i18n.uk.PROFILE_NONE
 
 
 def _real_repo_dispatcher(settings: Settings) -> tuple[Dispatcher, Bot, MockSession, SheetsRepo]:
@@ -900,12 +915,12 @@ async def test_a_first_profile_message_in_the_dm_keeps_the_group_profile(
     if first_dm_message == "/profile 45":
         # only the birth year moved, on both rows; sex and height survived
         assert _profile_cells(repo) == [(str(year - 45), "m", 180)] * 2
-        profile = i18n.fmt_profile(year - 45, "m", 180, year)
-        assert session.sent[-1]["text"] == i18n.PROFILE_SET.format(profile=profile)
+        profile = i18n.uk.fmt_profile(year - 45, "m", 180, year)
+        assert session.sent[-1]["text"] == i18n.uk.PROFILE_SET.format(profile=profile)
     else:
         # the DM shows the profile set in the group instead of "no profile"
-        profile = i18n.fmt_profile(1981, "m", 180, year)
-        assert session.sent[-1]["text"] == i18n.PROFILE_CURRENT.format(profile=profile)
+        profile = i18n.uk.fmt_profile(1981, "m", 180, year)
+        assert session.sent[-1]["text"] == i18n.uk.PROFILE_CURRENT.format(profile=profile)
 
 
 async def test_reply_videly_deletes_the_food_row(harness, repo: FakeRepo, settings: Settings):
@@ -920,7 +935,7 @@ async def test_reply_videly_deletes_the_food_row(harness, repo: FakeRepo, settin
     await dp.feed_update(bot, _update("видали", reply_to=borsch))
     assert [r["dish"] for r in repo.rows["food"]] == ["омлет"]  # the row is gone, not flagged
     assert ai.revise_calls == []  # and the word never reached Gemini
-    assert session.sent[-1]["text"] == f"{i18n.FOOD_DELETED} {i18n.day_total(500, 2000)}"
+    assert session.sent[-1]["text"] == f"{i18n.uk.FOOD_DELETED} {i18n.uk.day_total(500, 2000)}"
 
 
 async def test_a_wordy_delete_reply_still_deletes(harness, repo: FakeRepo, settings: Settings):
@@ -935,7 +950,7 @@ async def test_a_wordy_delete_reply_still_deletes(harness, repo: FakeRepo, setti
     await dp.feed_update(bot, _update("видали цей запис", reply_to=borsch))
     assert repo.rows["food"] == []
     assert ai.revise_calls == []
-    assert session.sent[-1]["text"].startswith(i18n.FOOD_DELETED)
+    assert session.sent[-1]["text"].startswith(i18n.uk.FOOD_DELETED)
 
 
 async def test_a_delete_verb_with_an_ingredient_is_still_a_correction(harness, repo: FakeRepo):
@@ -967,7 +982,7 @@ async def test_a_regret_phrase_deletes_the_food_row(harness, repo: FakeRepo, set
     await dp.feed_update(bot, _update("це жарт", reply_to=cake))
     assert [r["dish"] for r in repo.rows["food"]] == ["омлет"]
     assert ai.revise_calls == []
-    assert session.sent[-1]["text"] == f"{i18n.FOOD_DELETED} {i18n.day_total(500, 2000)}"
+    assert session.sent[-1]["text"] == f"{i18n.uk.FOOD_DELETED} {i18n.uk.day_total(500, 2000)}"
 
 
 async def test_a_regret_phrase_does_not_delete_a_sport_row(harness, repo: FakeRepo) -> None:
@@ -988,12 +1003,12 @@ async def test_a_regret_phrase_answering_the_food_prompt_is_food(harness, repo: 
     description it literally is - the prompt is cancelled by "скасуй", not by "це жарт"."""
     dp, bot, session, ai = harness
     ai.food_estimates = [FoodEstimate(dish="жарт", kcal=100)]
-    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    prompt = _bot_message(i18n.uk.FOOD_INPUT_PROMPT, 1001)
 
     await dp.feed_update(bot, _update("це жарт", reply_to=prompt))
     assert ai.estimate_calls == ["це жарт"]
     assert repo.rows["food"][0]["source"] == "prompt"
-    assert session.sent[-1]["text"] != i18n.PROMPT_CANCELLED
+    assert session.sent[-1]["text"] != i18n.uk.PROMPT_CANCELLED
 
 
 async def test_a_kg_marked_number_replying_to_an_estimate_is_a_weigh_in(
@@ -1048,7 +1063,7 @@ async def test_a_marked_number_under_someone_elses_estimate_is_a_weigh_in(
 
     await dp.feed_update(bot, _update("150", reply_to=food_msg, message_id=2))
     assert repo.rows["food"][0]["kcal"] == 600
-    assert session.sent[-1]["text"] == i18n.CORRECTION_NOT_FOUND
+    assert session.sent[-1]["text"] == i18n.uk.CORRECTION_NOT_FOUND
 
 
 async def test_deleting_someone_elses_food_row_is_refused(harness, repo: FakeRepo, user):
@@ -1057,25 +1072,25 @@ async def test_deleting_someone_elses_food_row_is_refused(harness, repo: FakeRep
     food_msg = _bot_message(i18n.FOOD_PREFIX + " 600 ккал - борщ", 778)
     await dp.feed_update(bot, _update("видали", reply_to=food_msg))
     assert len(repo.rows["food"]) == 1
-    assert session.sent[-1]["text"] == i18n.CORRECTION_NOT_FOUND
+    assert session.sent[-1]["text"] == i18n.uk.CORRECTION_NOT_FOUND
 
 
 async def test_reply_videly_deletes_the_sport_row(harness, repo: FakeRepo) -> None:
     dp, bot, session, _ = harness
     await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
     confirmation = session.sent[-1]["text"]
-    assert confirmation.startswith(i18n.SPORT_PREFIX)
+    assert confirmation.startswith(i18n.uk.SPORT_PREFIX)
     row = repo.rows["sport"][0]
     assert row["message_id"] == 1001  # keyed to the confirmation, not to the command
 
     sport_msg = _bot_message(confirmation, 1001)
     await dp.feed_update(bot, _update("скасуй", reply_to=sport_msg, message_id=2))
     assert repo.rows["sport"] == []
-    assert session.sent[-1]["text"] == i18n.SPORT_DELETED
+    assert session.sent[-1]["text"] == i18n.uk.SPORT_DELETED
 
     # a second try, and somebody else's entry, find nothing
     await dp.feed_update(bot, _update("видали", reply_to=sport_msg, message_id=3))
-    assert session.sent[-1]["text"] == i18n.SPORT_NOT_FOUND_FOR_DELETE
+    assert session.sent[-1]["text"] == i18n.uk.SPORT_NOT_FOUND_FOR_DELETE
 
 
 async def test_a_non_delete_reply_to_a_sport_confirmation_is_ignored(
@@ -1106,41 +1121,43 @@ async def test_delete_word_answering_the_food_prompt_records_nothing(harness, re
     dp, bot, session, ai = harness
     unused = FoodEstimate(dish="борщ", kcal=500)
     ai.food_estimates = [unused]
-    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    prompt = _bot_message(i18n.uk.FOOD_INPUT_PROMPT, 1001)
     await dp.feed_update(bot, _update("скасуй", reply_to=prompt))
-    assert session.sent[-1]["text"] == i18n.PROMPT_CANCELLED
+    assert session.sent[-1]["text"] == i18n.uk.PROMPT_CANCELLED
     assert ai.food_estimates == [unused] and repo.rows["food"] == []  # no AI call, nothing stored
 
-    sport_prompt = _bot_message(i18n.SPORT_INPUT_PROMPT, 1002)
+    sport_prompt = _bot_message(i18n.uk.SPORT_INPUT_PROMPT, 1002)
     await dp.feed_update(bot, _update("видали", reply_to=sport_prompt, message_id=2))
-    assert session.sent[-1]["text"] == i18n.PROMPT_CANCELLED
+    assert session.sent[-1]["text"] == i18n.uk.PROMPT_CANCELLED
     assert ai.sport_calls == [] and repo.rows["sport"] == []
 
 
 def test_target_suffix_hides_missing_or_broken_targets() -> None:
     items = [("08:05", "x", 100)]
-    assert i18n.kcal_today("A", "2026-09-10", items, None).endswith("Разом: 100 ккал.")
-    assert i18n.kcal_today("A", "2026-09-10", items, 0).endswith("Разом: 100 ккал.")
-    assert "nan" not in i18n.kcal_today("A", "2026-09-10", items, float("nan"))
-    assert "ціль" not in i18n.today_summary("A", "d", 100, 0, 0, 0, None, 1, float("nan"))
-    assert "(ціль 1800)" in i18n.day_total(100, 1800)
+    assert i18n.uk.kcal_today("A", "2026-09-10", items, None).endswith("Разом: 100 ккал.")
+    assert i18n.uk.kcal_today("A", "2026-09-10", items, 0).endswith("Разом: 100 ккал.")
+    assert "nan" not in i18n.uk.kcal_today("A", "2026-09-10", items, float("nan"))
+    assert "ціль" not in i18n.uk.today_summary("A", "d", 100, 0, 0, 0, None, 1, float("nan"))
+    assert "(ціль 1800)" in i18n.uk.day_total(100, 1800)
 
 
 def test_fmt_profile_names_only_the_known_fields() -> None:
-    full = i18n.fmt_profile(1981, "m", 180, 2026)
+    full = i18n.uk.fmt_profile(1981, "m", 180, 2026)
     assert full == "рік народження 1981 (45 р.), стать чоловіча, зріст 180 см"
-    assert i18n.fmt_profile(None, "f", None, 2026) == "стать жіноча"
-    assert i18n.fmt_profile(None, None, 180.5, 2026) == "зріст 180.5 см"
+    assert i18n.uk.fmt_profile(None, "f", None, 2026) == "стать жіноча"
+    assert i18n.uk.fmt_profile(None, None, 180.5, 2026) == "зріст 180.5 см"
     # a hand-typed year in the future would be a negative age: the year alone is shown
-    assert i18n.fmt_profile(2030, None, None, 2026) == "рік народження 2030"
-    assert i18n.fmt_profile(None, None, None, 2026) == ""
+    assert i18n.uk.fmt_profile(2030, None, None, 2026) == "рік народження 2030"
+    assert i18n.uk.fmt_profile(None, None, None, 2026) == ""
 
 
 def test_kcal_today_renders_the_time_of_every_entry() -> None:
-    text = i18n.kcal_today("A", "2026-09-17", [("07:54", "сирники", 390), (None, "чай", 20)], None)
+    text = i18n.uk.kcal_today(
+        "A", "2026-09-17", [("07:54", "сирники", 390), (None, "чай", 20)], None
+    )
     assert text.splitlines()[1:3] == [
         "07:54 - 390 ккал - сирники",
-        f"{i18n.KCAL_NO_TIME} - 20 ккал - чай",  # a row without a usable ts still shows up
+        f"{i18n.uk.KCAL_NO_TIME} - 20 ккал - чай",  # a row without a usable ts still shows up
     ]
 
 
@@ -1164,7 +1181,7 @@ async def test_food_command_with_yesterday_is_dated_yesterday(
     assert ai.estimate_calls == ["млинці зі сметаною"]  # the marker never reached Gemini
     reply = session.sent[-1]["text"]
     assert reply.startswith(i18n.FOOD_PREFIX)
-    assert i18n.day_total(500, None, yesterday) in reply
+    assert i18n.uk.day_total(500, None, yesterday) in reply
 
 
 async def test_a_yesterday_total_counts_only_yesterday(
@@ -1180,7 +1197,7 @@ async def test_a_yesterday_total_counts_only_yesterday(
 
     ai.food_estimates = [FoodEstimate(dish="млинці", kcal=500)]
     await dp.feed_update(bot, _update("/їжа вчора млинці"))
-    assert i18n.day_total(800, None, _yesterday_iso(settings)) in session.sent[-1]["text"]
+    assert i18n.uk.day_total(800, None, _yesterday_iso(settings)) in session.sent[-1]["text"]
 
 
 async def test_sport_command_with_yesterday_is_dated_yesterday(
@@ -1193,7 +1210,7 @@ async def test_sport_command_with_yesterday_is_dated_yesterday(
     assert ai.sport_calls == ["волейбол 2 години"]
     assert repo.rows["sport"][0]["date"] == yesterday
     reply = session.sent[-1]["text"]
-    assert reply.startswith(i18n.SPORT_PREFIX) and reply.endswith(f"Записано за {yesterday}.")
+    assert reply.startswith(i18n.uk.SPORT_PREFIX) and reply.endswith(f"Записано за {yesterday}.")
 
 
 async def test_a_yesterday_reply_to_the_food_prompt_is_dated_yesterday(
@@ -1201,7 +1218,7 @@ async def test_a_yesterday_reply_to_the_food_prompt_is_dated_yesterday(
 ) -> None:
     dp, bot, _, ai = harness
     ai.food_estimates = [FoodEstimate(dish="борщ", kcal=400)]
-    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    prompt = _bot_message(i18n.uk.FOOD_INPUT_PROMPT, 1001)
     await dp.feed_update(bot, _update("вчора борщ", reply_to=prompt))
 
     row = repo.rows["food"][0]
@@ -1247,10 +1264,10 @@ async def test_a_prompt_reply_of_only_a_time_asks_again(harness, repo: FakeRepo)
     dp, bot, session, ai = harness
     unused = FoodEstimate(dish="борщ", kcal=400)
     ai.food_estimates = [unused]
-    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    prompt = _bot_message(i18n.uk.FOOD_INPUT_PROMPT, 1001)
     await dp.feed_update(bot, _update("14:00 вчора", reply_to=prompt))
 
-    assert session.sent[-1]["text"] == i18n.FOOD_INPUT_PROMPT
+    assert session.sent[-1]["text"] == i18n.uk.FOOD_INPUT_PROMPT
     assert ai.food_estimates == [unused] and repo.rows["food"] == []
 
 
@@ -1260,11 +1277,11 @@ async def test_a_bare_yesterday_command_asks_for_the_text(harness, repo: FakeRep
     unused = FoodEstimate(dish="млинці", kcal=500)
     ai.food_estimates = [unused]
     await dp.feed_update(bot, _update("/їжа вчора"))
-    assert session.sent[-1]["text"] == i18n.FOOD_INPUT_PROMPT
+    assert session.sent[-1]["text"] == i18n.uk.FOOD_INPUT_PROMPT
     assert ai.food_estimates == [unused] and repo.rows["food"] == []
 
     await dp.feed_update(bot, _update("/спорт вчора", message_id=2))
-    assert session.sent[-1]["text"] == i18n.SPORT_INPUT_PROMPT
+    assert session.sent[-1]["text"] == i18n.uk.SPORT_INPUT_PROMPT
     assert ai.sport_calls == [] and repo.rows["sport"] == []
 
 
@@ -1313,7 +1330,7 @@ async def test_a_timed_reply_to_the_food_prompt_gets_the_time(
 ) -> None:
     dp, bot, _, ai = harness
     ai.food_estimates = [FoodEstimate(dish="яєчня", kcal=300)]
-    prompt = _bot_message(i18n.FOOD_INPUT_PROMPT, 1001)
+    prompt = _bot_message(i18n.uk.FOOD_INPUT_PROMPT, 1001)
     await dp.feed_update(bot, _update("яєчня з 3 яєць 14-00", reply_to=prompt))
 
     row = repo.rows["food"][0]
@@ -1343,7 +1360,7 @@ async def test_a_bare_timed_command_asks_for_the_text(harness, repo: FakeRepo, t
     unused = FoodEstimate(dish="борщ", kcal=500)
     ai.food_estimates = [unused]
     await dp.feed_update(bot, _update(text))
-    assert session.sent[-1]["text"] == i18n.FOOD_INPUT_PROMPT
+    assert session.sent[-1]["text"] == i18n.uk.FOOD_INPUT_PROMPT
     assert ai.food_estimates == [unused] and repo.rows["food"] == []
 
 
@@ -1355,4 +1372,4 @@ async def test_a_yesterday_food_row_can_still_be_deleted(harness, repo: FakeRepo
 
     await dp.feed_update(bot, _update("видали", reply_to=estimate, message_id=2))
     assert repo.rows["food"] == []
-    assert session.sent[-1]["text"].startswith(i18n.FOOD_DELETED)
+    assert session.sent[-1]["text"].startswith(i18n.uk.FOOD_DELETED)

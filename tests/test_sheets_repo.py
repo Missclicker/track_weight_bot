@@ -16,6 +16,7 @@ from bot.ai import FoodEstimate
 from bot.config import Settings
 from bot.parsing import parse_profile, parse_water_schedule
 from bot.sheets import HEADERS, SheetsRepo, User, WaterSubscription, explain_startup_error
+from tests.conftest import FakeRepo
 
 
 class FakeWorksheet:
@@ -463,7 +464,9 @@ async def test_upsert_user_keeps_a_hand_edited_profile(repo: SheetsRepo):
 def test_user_profile_round_trips_and_a_legacy_row_still_loads() -> None:
     user = User(user_id=1, chat_id=-100, name="A", height_cm=180, birth_year=1981, sex="m")
     row = [str(v) for v in user.to_row()]  # the sheet hands every cell back as a string
-    assert row[-2:] == ["1981", "m"]
+    # the profile cells by name: `lang` trails them now, blank for a user who never chose one
+    assert [row[HEADERS["users"].index(c)] for c in ("birth_year", "sex")] == ["1981", "m"]
+    assert row[-1] == ""
     back = User.from_record(dict(zip(HEADERS["users"], row, strict=True)))
     assert (back.birth_year, back.sex, back.height_cm) == (1981, "m", 180)
 
@@ -472,6 +475,141 @@ def test_user_profile_round_trips_and_a_legacy_row_still_loads() -> None:
     old = User.from_record(dict(zip(HEADERS["users"], legacy, strict=False)))
     assert (old.birth_year, old.sex) == (None, None)
     assert (old.height_cm, old.daily_kcal_target) == (180, 2000)
+
+
+# -- language ------------------------------------------------------------------------------------
+
+
+def test_users_header_ends_with_lang() -> None:
+    # trailing, so an existing spreadsheet only gains a column instead of shifting every value
+    assert HEADERS["users"][-3:] == ["birth_year", "sex", "lang"]
+
+
+@pytest.mark.parametrize(
+    ("cell", "expected"),
+    [
+        ("en", "en"),
+        ("EN", "en"),
+        (" English ", "en"),
+        ("uk", "uk"),
+        ("UA", "uk"),
+        ("українська", "uk"),
+        ("", None),
+        ("fr", None),
+        ("1", None),
+    ],
+)
+def test_user_lang_cell_is_normalised(cell: str, expected: str | None) -> None:
+    user = User.from_record({"user_id": "1", "chat_id": "-100", "lang": cell})
+    assert user.lang == expected
+
+
+def test_user_lang_round_trips_and_a_row_without_the_column_loads() -> None:
+    row = [str(v) for v in User(user_id=1, chat_id=-100, name="A", lang="en").to_row()]
+    assert row[HEADERS["users"].index("lang")] == "en"
+    assert User.from_record(dict(zip(HEADERS["users"], row, strict=True))).lang == "en"
+    # a row written before the column existed: twelve cells, nothing after `sex`
+    legacy = row[: HEADERS["users"].index("lang")]
+    assert User.from_record(dict(zip(HEADERS["users"], legacy, strict=False))).lang is None
+
+
+async def test_set_lang_writes_only_the_lang_cell_on_every_row_of_the_user(
+    repo: SheetsRepo, monkeypatch: pytest.MonkeyPatch
+):
+    # the same person in a group and in a DM, plus somebody else in the group
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A", tz="Europe/Kyiv"))
+    await repo.upsert_user(User(user_id=1, chat_id=1, name="A", birth_year=1981, sex="m"))
+    await repo.upsert_user(User(user_id=2, chat_id=-100, name="B"))
+    sheet = ws(repo, "users")
+    sheet.rows[1][HEADERS["users"].index("daily_kcal_target")] = "2000"  # hand-edited, per chat
+    before = [list(row) for row in sheet.rows]
+    batches: list[int] = []
+    batch_update = sheet.batch_update
+
+    def counted_batch_update(data: list[dict[str, Any]]) -> None:
+        batches.append(len(data))
+        batch_update(data)
+
+    monkeypatch.setattr(sheet, "batch_update", counted_batch_update)
+    assert await repo.get_lang(1) == "uk"  # warms the cache, which set_lang must then drop
+
+    await repo.set_lang(1, "en")
+    assert batches == [2]  # both rows in one request
+    col = HEADERS["users"].index("lang")
+    for row_no in (1, 2):
+        assert sheet.rows[row_no][col] == "en"
+        others = [i for i in range(len(HEADERS["users"])) if i != col]
+        assert [sheet.rows[row_no][i] for i in others] == [before[row_no][i] for i in others]
+    assert sheet.rows[3] == before[3]  # the other user's row is not touched at all
+
+    assert await repo.get_lang(1) == "en"
+    assert await repo.get_lang(2) == "uk"
+    group, dm = await repo.get_user(1, -100), await repo.get_user(1, 1)
+    assert group is not None and dm is not None and (group.lang, dm.lang) == ("en", "en")
+
+    await repo.set_lang(1, "uk")  # and back
+    assert await repo.get_lang(1) == "uk"
+    assert sheet.rows[1][col] == "uk"
+
+    await repo.set_lang(3, "en")  # unknown user: nothing written, no row created
+    assert batches == [2, 2]
+    assert len(sheet.rows) == 4
+
+
+async def test_get_lang_defaults_to_ukrainian(repo: SheetsRepo):
+    assert await repo.get_lang(1) == "uk"  # no row at all
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A"))
+    assert await repo.get_lang(1) == "uk"  # a row, the language never chosen
+    ws(repo, "users").rows[1][HEADERS["users"].index("lang")] = "klingon"
+    repo._users_cache = None
+    assert await repo.get_lang(1) == "uk"  # garbage typed by hand reads as unset
+
+
+async def test_a_blank_lang_cell_is_filled_from_the_persons_other_rows(repo: SheetsRepo):
+    sheet = ws(repo, "users")
+    for user in (
+        User(1, -100, "A", lang="en"),
+        User(1, 1, "A"),  # the DM row registered after the language was chosen in the group
+        User(1, -200, "A", lang="uk"),  # a row's own cell wins
+        User(2, -100, "B"),
+    ):
+        sheet.append_row(user.to_row(), "RAW")
+    before = [list(row) for row in sheet.rows]
+
+    async def lang(user_id: int, chat_id: int) -> str | None:
+        user = await repo.get_user(user_id, chat_id)
+        assert user is not None
+        return user.lang
+
+    assert await lang(1, 1) == "en"
+    assert await lang(1, -200) == "uk"
+    assert await lang(1, -100) == "en"
+    assert await lang(2, -100) is None  # only the same user_id's rows count
+    assert await repo.get_lang(1) == "en"  # the first row in sheet order
+    assert sheet.rows == before  # filled on read only, nothing is written back
+
+
+async def test_upsert_user_keeps_the_language(repo: SheetsRepo):
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A"))
+    await repo.set_lang(1, "en")
+    await repo.upsert_user(User(user_id=1, chat_id=-100, name="A renamed"))
+    assert ws(repo, "users").rows[1][HEADERS["users"].index("lang")] == "en"
+    user = await repo.get_user(1, -100)
+    assert user is not None and (user.name, user.lang) == ("A renamed", "en")
+
+
+async def test_fake_repo_language_matches_the_real_one() -> None:
+    fake = FakeRepo()
+    assert await fake.get_lang(1) == "uk"
+    await fake.set_lang(1, "en")  # nobody registered yet: nothing to write
+    assert await fake.get_lang(1) == "uk"
+    await fake.upsert_user(User(user_id=1, chat_id=-100, name="A"))
+    await fake.set_lang(1, "en")
+    assert await fake.get_lang(1) == "en"
+    await fake.upsert_user(User(user_id=1, chat_id=-100, name="A renamed"))  # keeps it
+    assert await fake.get_lang(1) == "en"
+    user = await fake.get_user(1, -100)
+    assert user is not None and user.lang == "en"
 
 
 @pytest.mark.parametrize(

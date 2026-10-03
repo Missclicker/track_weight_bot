@@ -17,6 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot import i18n
 from bot.ai import FoodEstimate
 from bot.config import Settings
+from bot.reports import build_weekly_payload
 from bot.scheduler import Jobs, build_scheduler, is_personal_chat
 from bot.sheets import User
 from tests.conftest import FakeRepo
@@ -48,12 +49,14 @@ class FakeBot:
 
 
 class FakeAI:
-    """Records the payload, the `personal` flag and the previous report of every call."""
+    """Records the payload, the `personal` flag, the previous report and the language of every
+    call."""
 
     def __init__(self, fail: bool = False, answer: str = "порада від AI") -> None:
         self.calls: list[tuple[dict[str, Any], bool]] = []
         self.notices: list[Any] = []
         self.previous: list[str | None] = []
+        self.langs: list[str] = []
         self.fail = fail
         self.answer = answer
 
@@ -64,10 +67,12 @@ class FakeAI:
         on_retry: Any = None,
         *,
         previous_report: str | None = None,
+        lang: str = i18n.DEFAULT_LANG,
     ) -> str:
         self.calls.append((payload, personal))
         self.notices.append(on_retry)
         self.previous.append(previous_report)
+        self.langs.append(lang)
         if self.fail:
             raise RuntimeError("gemini is having a bad day")
         return self.answer
@@ -267,9 +272,9 @@ async def test_numbers_are_sent_when_gemini_fails(repo: FakeRepo, user: User) ->
 WEEK_START = date(2026, 9, 7)
 
 
-def _header(start: date) -> str:
+def _header(start: date, lang: str = "uk") -> str:
     end = start + timedelta(days=6)
-    return i18n.WEEKLY_HEADER.format(start=start.isoformat(), end=end.isoformat())
+    return i18n.t(lang).WEEKLY_HEADER.format(start=start.isoformat(), end=end.isoformat())
 
 
 async def _logged_week(repo: FakeRepo, user: User) -> None:
@@ -297,8 +302,11 @@ async def test_last_weeks_report_is_passed_without_its_header(repo: FakeRepo, us
         pytest.param(3, GROUP, "\n\nпорада", id="overlapping"),
         pytest.param(14, GROUP, "\n\nпорада", id="too-old"),
         pytest.param(7, -200, "\n\nпорада", id="another-chat"),
-        pytest.param(7, GROUP, f"\n{i18n.WEEKLY_AI_FAILED}\n\nОлексій: 1800", id="numbers-only"),
-        pytest.param(7, GROUP, f"\n{i18n.WEEKLY_NO_DATA}", id="no-data"),
+        pytest.param(7, GROUP, f"\n{i18n.uk.WEEKLY_AI_FAILED}\n\nОлексій: 1800", id="numbers-only"),
+        pytest.param(7, GROUP, f"\n{i18n.uk.WEEKLY_NO_DATA}", id="no-data"),
+        # the chat's language may have changed since: last week's text is read in either one
+        pytest.param(7, GROUP, f"\n{i18n.en.WEEKLY_AI_FAILED}\n\nОлексій: 1800", id="en-numbers"),
+        pytest.param(7, GROUP, f"\n{i18n.en.WEEKLY_NO_DATA}", id="en-no-data"),
     ],
 )
 async def test_only_last_weeks_advice_counts_as_the_previous_report(
@@ -400,6 +408,139 @@ async def test_a_long_report_is_sent_in_pieces_and_stored_once(repo: FakeRepo, u
     # one report: stored whole, once, and nothing lost between the pieces
     assert [row["text"] for row in repo.rows["reports"]] == [text]
     assert "\n\n".join(sent) == text
+
+
+# -- the report's language --------------------------------------------------------------------
+
+
+async def _group_of(repo: FakeRepo, *langs: str | None, active: bool = True) -> None:
+    """One member of GROUP per language, each with a logged week; ids follow on from those there."""
+    for lang in langs:
+        uid = len(repo.users) + 10
+        member = User(
+            user_id=uid, chat_id=GROUP, name=f"u{uid}", tz="Europe/Kyiv", active=active, lang=lang
+        )
+        await repo.upsert_user(member)
+        await repo.add_food(member, _food(1800), _dt(date(2026, 9, 9)), "text", uid)
+
+
+@pytest.mark.parametrize(
+    ("langs", "expected"),
+    [
+        pytest.param(("en", "en", "uk"), "en", id="most-english"),
+        pytest.param(("en", "uk"), "en", id="tie-goes-to-english"),
+        pytest.param(("en", None, None), "uk", id="unset-counts-as-ukrainian"),
+        pytest.param(("uk", "uk", "en"), "uk", id="most-ukrainian"),
+        pytest.param((None,), "uk", id="nobody-chose"),
+    ],
+)
+async def test_a_group_report_is_in_the_language_most_members_use(
+    repo: FakeRepo, langs: tuple[str | None, ...], expected: str
+) -> None:
+    await _group_of(repo, *langs)
+    ai = FakeAI()
+    jobs, bot = _jobs(repo, _settings(str(GROUP)), ai)
+    text = await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert ai.langs == [expected]
+    assert text == f"{_header(WEEK_START, expected)}\n\nпорада від AI"
+    assert bot.sent == [(GROUP, text)]
+
+
+async def test_members_who_left_do_not_vote(repo: FakeRepo) -> None:
+    await _group_of(repo, "en")
+    await _group_of(repo, "uk", "uk", active=False)
+    ai = FakeAI()
+    jobs, _ = _jobs(repo, _settings(str(GROUP)), ai)
+    await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert ai.langs == ["en"]
+
+
+async def test_the_group_roster_is_read_once(repo: FakeRepo) -> None:
+    """The payload and the language vote share one read of the chat's active users."""
+    await _group_of(repo, "en", "uk", "en")
+    original = repo.get_active_users
+    reads: list[int] = []
+
+    async def counting(chat_id: int) -> list[User]:
+        reads.append(chat_id)
+        return await original(chat_id)
+
+    repo.get_active_users = counting  # type: ignore[method-assign]
+    ai = FakeAI()
+    jobs, _ = _jobs(repo, _settings(str(GROUP)), ai)
+    await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert reads == [GROUP]
+    assert ai.langs == ["en"]
+
+
+@pytest.mark.parametrize(("lang", "expected"), [("en", "en"), ("uk", "uk"), (None, "uk")])
+async def test_a_dm_report_is_in_its_owners_language(
+    repo: FakeRepo, lang: str | None, expected: str
+) -> None:
+    # the group is all-Ukrainian: a DM follows its owner, never somebody else's majority
+    await _group_of(repo, "uk", "uk")
+    loner = User(user_id=LONER, chat_id=LONER, name="Сам", tz="Europe/Kyiv", lang=lang)
+    await repo.upsert_user(loner)
+    await repo.add_food(loner, _food(1800), _dt(date(2026, 9, 9)), "text", 1)
+
+    ai = FakeAI()
+    jobs, bot = _jobs(repo, _settings(f"{GROUP},{LONER}"), ai)
+    text = await jobs.run_weekly_report(LONER, today=MONDAY)
+
+    assert ai.langs == [expected]
+    assert ai.calls[0][1] is True
+    assert bot.sent == [(LONER, f"{_header(WEEK_START, expected)}\n\nпорада від AI")]
+    assert text == bot.sent[0][1]
+
+
+async def test_the_numbers_only_fallback_is_in_the_chats_language(repo: FakeRepo) -> None:
+    await _group_of(repo, "en", "en", "uk")
+    jobs, bot = _jobs(repo, _settings(str(GROUP)), FakeAI(fail=True))
+    text = await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    payload = await build_weekly_payload(repo, GROUP, WEEK_START)
+    stats = "\n".join(i18n.en.weekly_stats_block(u) for u in payload["users"])
+    assert text == f"{_header(WEEK_START, 'en')}\n{i18n.en.WEEKLY_AI_FAILED}\n\n{stats}"
+    assert bot.sent == [(GROUP, text)]
+
+
+async def test_the_no_data_text_is_in_the_chats_language(repo: FakeRepo) -> None:
+    for uid, lang in ((10, "en"), (11, "en"), (12, "uk")):
+        member = User(user_id=uid, chat_id=GROUP, name=f"u{uid}", tz="Europe/Kyiv", lang=lang)
+        await repo.upsert_user(member)
+    ai = FakeAI()
+    jobs, bot = _jobs(repo, _settings(str(GROUP)), ai)
+    text = await jobs.run_weekly_report(GROUP, today=MONDAY)
+
+    assert text == f"{_header(WEEK_START, 'en')}\n{i18n.en.WEEKLY_NO_DATA}"
+    assert ai.calls == []
+    assert bot.sent == [(GROUP, text)]
+
+
+async def test_a_failing_language_lookup_still_sends_the_report(
+    repo: FakeRepo, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The language is a nicety next to the report itself: it falls back to the default."""
+    loner = User(user_id=LONER, chat_id=LONER, name="Сам", tz="Europe/Kyiv", lang="en")
+    await repo.upsert_user(loner)
+    await repo.add_food(loner, _food(1800), _dt(date(2026, 9, 9)), "text", 1)
+
+    async def broken(user_id: int) -> str:
+        raise RuntimeError("sheets is down")
+
+    repo.get_lang = broken  # type: ignore[method-assign]
+    caplog.set_level(logging.WARNING, logger="bot.scheduler")
+    ai = FakeAI()
+    jobs, bot = _jobs(repo, _settings(str(LONER)), ai)
+    text = await jobs.run_weekly_report(LONER, today=MONDAY)
+
+    assert ai.langs == ["uk"]
+    assert text == f"{_header(WEEK_START)}\n\nпорада від AI"
+    assert bot.sent == [(LONER, text)]
+    assert [r.levelname for r in caplog.records if r.exc_info] == ["WARNING"]
 
 
 def test_the_weekly_job_runs_monday_morning(repo: FakeRepo) -> None:

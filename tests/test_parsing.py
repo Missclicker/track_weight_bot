@@ -130,6 +130,13 @@ def test_parse_weight_with_require_marker(text: str, expected: float | None) -> 
         ("0", 0.0),
         ("1 200", 1200.0),
         ("1200.5", 1200.0),  # a decimal is tolerated but truncated to the integer part
+        # the English units
+        ("650 cal", 650.0),
+        ("650 cals", 650.0),
+        ("650 calories", 650.0),
+        ("650 Calories.", 650.0),
+        ("1 calorie", 1.0),
+        ("650 kcals", 650.0),
     ],
 )
 def test_parse_correction_accepts(text: str, expected: float) -> None:
@@ -138,7 +145,20 @@ def test_parse_correction_accepts(text: str, expected: float) -> None:
 
 @pytest.mark.parametrize(
     "text",
-    [None, "", "abc", "650 грам", "12:30", "-100", "99999", "650 ккал будь ласка", "1e3"],
+    [
+        None,
+        "",
+        "abc",
+        "650 грам",
+        "12:30",
+        "-100",
+        "99999",
+        "650 ккал будь ласка",
+        "1e3",
+        "650 calories please",
+        "650 grams",
+        "650 calz",
+    ],
 )
 def test_parse_correction_rejects(text: str | None) -> None:
     assert parse_correction(text) is None
@@ -178,6 +198,47 @@ def test_parse_correction_rejects(text: str | None) -> None:
         ("кожні 30 хв будні", WEEKDAYS, time(9), time(21), 30),
         ("кожні 12 годин щодня", ALL_DAYS, time(9), time(21), 720),
         ("9:15-18:45 кожні 15 хвилин", ALL_DAYS, time(9, 15), time(18, 45), 15),
+        # English: interval forms
+        ("every 30 minutes", ALL_DAYS, time(9), time(21), 30),
+        ("every 1 hour", ALL_DAYS, time(9), time(21), 60),
+        ("each 30 min", ALL_DAYS, time(9), time(21), 30),
+        ("once an hour", ALL_DAYS, time(9), time(21), 60),
+        ("hourly", ALL_DAYS, time(9), time(21), 60),
+        ("Hourly on weekdays", WEEKDAYS, time(9), time(21), 60),
+        ("half-hourly", ALL_DAYS, time(9), time(21), 30),
+        ("half hourly 9-17", ALL_DAYS, time(9), time(17), 30),
+        # English: day groups
+        ("weekends every 2 hours", WEEKEND, time(9), time(21), 120),
+        ("working days every hour", WEEKDAYS, time(9), time(21), 60),
+        ("workdays every hour", WEEKDAYS, time(9), time(21), 60),
+        ("work days every hour", WEEKDAYS, time(9), time(21), 60),
+        ("business days every hour", WEEKDAYS, time(9), time(21), 60),
+        ("every day every hour", ALL_DAYS, time(9), time(21), 60),
+        ("every 30 min every day", ALL_DAYS, time(9), time(21), 30),
+        ("everyday every hour", ALL_DAYS, time(9), time(21), 60),
+        ("each day each 45 minutes", ALL_DAYS, time(9), time(21), 45),
+        # English: day names, plurals and short forms
+        ("monday, wednesday, friday every hour", frozenset({0, 2, 4}), time(9), time(21), 60),
+        ("on mondays and fridays hourly", frozenset({0, 4}), time(9), time(21), 60),
+        ("tues, thurs every hour", frozenset({1, 3}), time(9), time(21), 60),
+        ("every hour on weds", frozenset({2}), time(9), time(21), 60),
+        ("monday to friday every hour", WEEKDAYS, time(9), time(21), 60),
+        ("mon thru fri from 9 to 18 hourly", WEEKDAYS, time(9), time(18), 60),
+        ("every 2 hours friday until sunday", frozenset({4, 5, 6}), time(9), time(21), 120),
+        ("Saturdays and Sundays every 2 hours", WEEKEND, time(9), time(21), 120),
+        ("mon-fri from 9 till 18 every 30 min", WEEKDAYS, time(9), time(18), 30),
+        # English: windows
+        ("between 9 and 18 every 30 min", ALL_DAYS, time(9), time(18), 30),
+        ("every 30 min from 9 until 17", ALL_DAYS, time(9), time(17), 30),
+        (
+            "weekdays between 09:00 and 18:30 each 45 minutes",
+            WEEKDAYS,
+            time(9),
+            time(18, 30),
+            45,
+        ),
+        # the interval is cut out before the window is looked for, in English too
+        ("every 2 hours between 10 and 20", ALL_DAYS, time(10), time(20), 120),
     ],
 )
 def test_parse_water_schedule_accepts(
@@ -202,6 +263,11 @@ def test_parse_water_schedule_accepts(
         "з 9 до 9 кожні 30 хв",  # empty window
         "кожні 30 хв з 25 до 26",  # impossible hours
         "абракадабра",
+        "every day",  # a day group is not an interval
+        "weekdays between 9 and 18",
+        "between 18 and 9 hourly",  # inverted window
+        "every 5 minutes",
+        "hourlyish",
     ],
 )
 def test_parse_water_schedule_rejects(text: str | None) -> None:
@@ -247,12 +313,34 @@ def test_parse_kcal_target_rejects(text: str | None) -> None:
     assert parse_kcal_target(text) is None
 
 
-@pytest.mark.parametrize("text", ["стоп", "Стоп.", "0", "скинути", "off", "немає"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "стоп",
+        "Стоп.",
+        "0",
+        "скинути",
+        "off",
+        "немає",
+        # English: "/target stop" and "/profile stop" clear just like "/ціль стоп"
+        "stop",
+        "Stop!",
+        "none",
+        "no",
+        "remove",
+        "delete",
+        "unset",
+        "reset",
+        "clear",
+    ],
+)
 def test_target_clear_words(text: str) -> None:
     assert is_target_clear_request(text)
 
 
-@pytest.mark.parametrize("text", [None, "", "2000", "стоп пити", "стопкран"])
+@pytest.mark.parametrize(
+    "text", [None, "", "2000", "стоп пити", "стопкран", "stop it now", "no target", "nope"]
+)
 def test_target_clear_words_reject(text: str | None) -> None:
     assert not is_target_clear_request(text)
 
@@ -334,6 +422,32 @@ YEAR = 2026  # the "current year" every profile case below is parsed against
             ProfileUpdate(birth_year=1981, sex="m", height_cm=180),
         ),
         ("  45   ж!  ", ProfileUpdate(birth_year=1981, sex="f")),
+        # English labels parse to what the Ukrainian ones do
+        ("1981 m 180", ProfileUpdate(birth_year=1981, sex="m", height_cm=180)),
+        (
+            "age 45 female height 165.5 cm",
+            ProfileUpdate(birth_year=1981, sex="f", height_cm=165.5),
+        ),
+        (
+            "born 1981, sex m, height 180cm",
+            ProfileUpdate(birth_year=1981, sex="m", height_cm=180),
+        ),
+        ("45 years old f 165", ProfileUpdate(birth_year=1981, sex="f", height_cm=165)),
+        (
+            "Year of birth: 1981, gender: F, 170 cm tall",
+            ProfileUpdate(birth_year=1981, sex="f", height_cm=170),
+        ),
+        ("birth year 1981", ProfileUpdate(birth_year=1981)),
+        ("aged 45", ProfileUpdate(birth_year=1981)),
+        ("age: 45", ProfileUpdate(birth_year=1981)),
+        ("45 y.o.", ProfileUpdate(birth_year=1981)),  # the trailing dot goes, as in "р.н."
+        ("45 yo, male", ProfileUpdate(birth_year=1981, sex="m")),
+        ("45 yrs", ProfileUpdate(birth_year=1981)),
+        ("45 y", ProfileUpdate(birth_year=1981)),
+        ("45 yr old", ProfileUpdate(birth_year=1981)),
+        ("height: 180", ProfileUpdate(height_cm=180)),
+        ("180 tall", ProfileUpdate(height_cm=180)),
+        ("gender:m", ProfileUpdate(sex="m")),
     ],
 )
 def test_parse_profile_accepts(text: str, expected: ProfileUpdate) -> None:
@@ -369,6 +483,12 @@ def test_parse_profile_accepts(text: str, expected: ProfileUpdate) -> None:
         "0",
         "-45",
         "12345",
+        # English: only labels are skipped, anything else still spoils the message
+        "i am 45",
+        "45 years old m 180 in",  # "in" is ambiguous (inches or a preposition), so not a label
+        "45 years old boy",
+        "age weight height",
+        "age 45 aged 46",
     ],
 )
 def test_parse_profile_rejects(text: str | None) -> None:
@@ -402,6 +522,21 @@ def test_delete_request_ignores_case_space_and_punctuation(text: str) -> None:
         "скасуй будь ласка",
         "видали це",
         "delete this please",
+        # English
+        "undo",
+        "Undo that!",
+        "scrap that",
+        "delete this one",
+        "remove this entry",
+        "remove that one",
+        "cancel this record plz",
+        "delete this message",
+        "Never mind.",
+        "that's not mine",
+        "That’s not mine",  # the typographic apostrophe phones substitute
+        "thats not mine",
+        "it's not mine",
+        "Not my food",
     ],
 )
 def test_delete_request_allows_filler_around_the_verb(text: str) -> None:
@@ -422,6 +557,22 @@ def test_delete_request_allows_filler_around_the_verb(text: str) -> None:
         "не видали",
         "650",
         "скасування",
+        # English: the same safety net
+        "remove bread",
+        "remove the bread",
+        "remove one",  # fewer pieces of the dish, not the record
+        "delete one",
+        "remove these",
+        "delete the sauce please",
+        "scrap the fries",
+        "undo 300",
+        "don't delete",
+        "do not remove",
+        "drop it",  # "drop" is an ingredient edit far more often than a delete
+        "drop",
+        "never mind the bread",
+        "not mine, the bread",
+        "remove item",
     ],
 )
 def test_delete_request_rejects(text: str | None) -> None:
@@ -477,6 +628,59 @@ def test_every_regret_phrase_is_stored_in_canonical_form(phrase: str) -> None:
         "видали цей запис",
         "скасуй будь ласка",
         "це не моє",
+        # English: "не записуй / не рахуй", in every apostrophe the keyboard produces
+        "don't log",
+        "Don’t log this.",
+        "donʼt log",
+        "dont log",
+        "do not log",
+        "don't log it",
+        "don't record",
+        "do not record this",
+        "don't count",
+        "don't count this",
+        "don't save that",
+        "dont track",
+        "no need to log this",
+        # "жарт"
+        "joke",
+        "it's a joke",
+        "It was a joke!",
+        "just a joke",
+        "just kidding",
+        "kidding",
+        "jk",
+        "I'm joking",
+        # "випадково"
+        "accident",
+        "by accident",
+        "accidentally",
+        "sent by accident",
+        "sent it by accident",
+        "I sent it by accident",
+        "I accidentally sent it",
+        "it was an accident",
+        # "помилка"
+        "mistake",
+        "my mistake",
+        "by mistake",
+        "it was a mistake",
+        "sent it by mistake",
+        "my bad",
+        "oops",
+        "Oops, wrong photo",
+        "wrong photo",
+        "wrong pic",
+        # politeness on either side, like "будь ласка"
+        "please don't log",
+        "don't log this, please",
+        "pls don't count it",
+        "sorry, wrong photo",
+        "my mistake, sorry",
+        # the narrow English vocabulary counts here too
+        "undo",
+        "never mind",
+        "not my food",
     ],
 )
 def test_food_cancel_request_accepts(text: str) -> None:
@@ -504,6 +708,24 @@ def test_food_cancel_request_accepts(text: str) -> None:
         "видали 300",
         "650",
         "скасування",
+        # English: a content word turns the regret into a correction of the dish ...
+        "don't log the bread",
+        "don't count the sauce",
+        "do not record the drink",
+        "mistake in portion",
+        "a mistake in the grams",
+        "accidentally ate two",
+        "it's a joke about borscht",
+        "wrong portion",  # ... and so does any "wrong" other than the picture itself
+        "wrong dish",
+        "wrong food",
+        "kidding aside it was 300 g",
+        "log it",  # no negation, no regret
+        "sorry",  # politeness alone is nothing
+        "please",
+        "mistaken",  # a near-miss word form is not the phrase
+        "jokes",
+        "remove bread",
     ],
 )
 def test_food_cancel_request_rejects(text: str | None) -> None:
@@ -516,6 +738,11 @@ def test_food_cancel_request_does_not_widen_the_delete_vocabulary() -> None:
     assert not is_delete_request("це жарт")
     assert not is_delete_request("я випадково")
     assert not is_delete_request("не записуй")
+    assert not is_delete_request("it's a joke")
+    assert not is_delete_request("by accident")
+    assert not is_delete_request("don't log")
+    assert not is_delete_request("wrong photo")
+    assert not is_delete_request("oops")
 
 
 @pytest.mark.parametrize(

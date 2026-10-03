@@ -62,3 +62,33 @@ def test_every_activity_has_positive_met_and_title() -> None:
         assert activity.met > 0
         assert activity.title
         assert activity.patterns
+
+
+def test_every_activity_has_an_english_title() -> None:
+    for activity in met.ACTIVITIES.values():
+        # spelled out on every row, not left to the dataclass default
+        assert activity.title_en and activity.title_en.isascii(), activity.key
+        assert activity.title_en != activity.title
+
+
+@pytest.mark.parametrize(
+    ("key", "lang", "expected"),
+    [
+        ("running", "en", "running"),
+        ("running", "EN", "running"),
+        ("running", "uk", "біг"),
+        ("running", None, "біг"),  # unset: the Ukrainian default
+        ("running", "fr", "біг"),
+        ("gym", "en", "gym / strength"),
+        ("curling", "en", "curling"),  # unknown key: shown as it is, in either language
+        ("curling", "uk", "curling"),
+    ],
+)
+def test_activity_title(key: str, lang: str | None, expected: str) -> None:
+    assert met.activity_title(key, lang) == expected
+
+
+def test_the_fallback_activity_row_still_builds() -> None:
+    # `estimate_kcal` constructs an ad-hoc row positionally for an unknown key
+    activity = met.Activity("curling", "curling", 5.0, ())
+    assert activity.title_en == ""

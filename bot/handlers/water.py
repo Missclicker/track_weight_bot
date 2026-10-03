@@ -18,11 +18,25 @@ from aiogram.types import Message
 from bot import i18n
 from bot.config import Settings
 from bot.handlers import ensure_user, find_member
+from bot.i18n import Lang
 from bot.parsing import parse_water_schedule
 from bot.scheduler import Jobs, is_unreachable_chat, user_tz
 from bot.sheets import SheetsRepo, User, WaterSubscription
 
-_STOP_WORDS = frozenset({"стоп", "stop", "off", "вимкнути", "видалити", "скасувати"})
+_STOP_WORDS = frozenset(
+    {
+        "стоп",
+        "stop",
+        "off",
+        "вимкнути",
+        "видалити",
+        "скасувати",
+        "cancel",
+        "disable",
+        "remove",
+        "delete",
+    }
+)
 
 
 async def _acting_user(message: Message, repo: SheetsRepo, settings: Settings) -> User | None:
@@ -37,12 +51,15 @@ async def _acting_user(message: Message, repo: SheetsRepo, settings: Settings) -
     return await find_member(message.from_user.id, repo, settings)
 
 
-async def _status(repo: SheetsRepo, user: User) -> str:
+async def _status(repo: SheetsRepo, user: User, lang: Lang) -> str:
+    strings = i18n.t(lang)
     subs = await repo.get_water_subscriptions()
     mine = next((s for s in subs if s.user_id == user.user_id and s.active), None)
     if mine is None:
-        return i18n.WATER_USAGE
-    return i18n.WATER_STATUS.format(schedule=i18n.fmt_water_schedule(mine.schedule), tz=mine.tz)
+        return strings.WATER_USAGE
+    return strings.WATER_STATUS.format(
+        schedule=strings.fmt_water_schedule(mine.schedule), tz=mine.tz
+    )
 
 
 async def cmd_water(
@@ -52,28 +69,30 @@ async def cmd_water(
     settings: Settings,
     jobs: Jobs,
     bot: Bot,
+    lang: Lang,
 ) -> None:
     """Show, set or cancel the sender's water reminders."""
+    strings = i18n.t(lang)
     user = await _acting_user(message, repo, settings)
     if user is None:
-        await message.answer(i18n.PRIVATE_CHAT_ONLY_GROUP)
+        await message.answer(strings.PRIVATE_CHAT_ONLY_GROUP)
         return
     args = (command.args or "").strip()
     if not args:
-        await message.reply(await _status(repo, user))
+        await message.reply(await _status(repo, user, lang))
         return
     if args.lower() in _STOP_WORDS:
         stopped = await repo.deactivate_water_subscription(user.user_id)
         await jobs.reload_water_subscriptions()
-        await message.reply(i18n.WATER_STOPPED if stopped else i18n.WATER_NOT_SUBSCRIBED)
+        await message.reply(strings.WATER_STOPPED if stopped else strings.WATER_NOT_SUBSCRIBED)
         return
     schedule = parse_water_schedule(args)
     if schedule is None:
-        await message.reply(i18n.WATER_USAGE)
+        await message.reply(strings.WATER_USAGE)
         return
-    summary = i18n.fmt_water_schedule(schedule)
+    summary = strings.fmt_water_schedule(schedule)
     try:
-        await bot.send_message(user.user_id, i18n.WATER_SUBSCRIBED_DM.format(schedule=summary))
+        await bot.send_message(user.user_id, strings.WATER_SUBSCRIBED_DM.format(schedule=summary))
     except (TelegramForbiddenError, TelegramBadRequest) as exc:
         # "bot can't initiate conversation with a user" / "chat not found": nothing is stored,
         # otherwise every tick would try to write into a chat that does not exist. Any other
@@ -82,7 +101,7 @@ async def cmd_water(
             raise
         me = await bot.me()
         link = f"https://t.me/{me.username}?start=water"
-        await message.reply(i18n.WATER_NEED_DM.format(link=link))
+        await message.reply(strings.WATER_NEED_DM.format(link=link))
         return
     tz = user_tz(user, settings)
     await repo.upsert_water_subscription(
@@ -98,7 +117,7 @@ async def cmd_water(
     await jobs.reload_water_subscriptions()
     if message.chat.type != ChatType.PRIVATE:
         # in the DM the message above is already the confirmation
-        await message.reply(i18n.WATER_SUBSCRIBED.format(schedule=summary, tz=tz.key))
+        await message.reply(strings.WATER_SUBSCRIBED.format(schedule=summary, tz=tz.key))
 
 
 def build() -> Router:

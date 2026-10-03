@@ -224,18 +224,24 @@ def _window_numbers(
     }
 
 
-async def build_weekly_payload(repo: Repo, chat_id: int, week_start: date) -> dict[str, Any]:
+async def build_weekly_payload(
+    repo: Repo, chat_id: int, week_start: date, users: list[User] | None = None
+) -> dict[str, Any]:
     """JSON-serialisable summary of 7 days starting at `week_start` for every active user.
 
     Besides the week's own numbers every person gets the ones a nutritionist reads them against
     (protein target, BMI, BMR, a maintenance estimate - see `bot/nutrition.py`) and the previous 7
     days measured the same way. All of it is computed here, so the model only interprets numbers
-    and never has to invent one; what cannot be computed is None.
+    and never has to invent one; what cannot be computed is None. `users` is the chat's active
+    users when the caller has already read them (the scheduler needs them for the report's
+    language too); None reads them here.
     """
     week_end = week_start + timedelta(days=6)
     prev_start, prev_end = week_start - timedelta(days=7), week_start - timedelta(days=1)
+    if users is None:
+        users = await repo.get_active_users(chat_id)
     users_payload: list[dict[str, Any]] = []
-    for user in await repo.get_active_users(chat_id):
+    for user in users:
         # Three reads per person, as many as for one week: each one scans a whole tab against the
         # Sheets per-minute read quota, so both windows come out of one wider read each. Weight
         # goes back to the first row ever - the current weight may be a weigh-in from long ago.
@@ -262,7 +268,7 @@ async def build_weekly_payload(repo: Repo, chat_id: int, week_start: date) -> di
         this = _window_numbers(food, sport, weights, reference_kg)
         maintenance = nutrition.maintenance_kcal(bmr, this["sport_kcal"] / 7)
         kcal_target = user.daily_kcal_target
-        # the same sanity rule as `i18n._target_suffix`: a zero or non-finite cell is no target
+        # the same sanity rule as the i18n `_target_suffix`: a zero or non-finite cell is no target
         has_kcal_target = kcal_target is not None and math.isfinite(kcal_target) and kcal_target > 0
 
         prev_food = _dated_between(food_rows, prev_start, prev_end)
@@ -318,25 +324,37 @@ MESSAGE_LIMIT = 4000
 # person in a group), and it must stay far above that, or the last people of a larger group would
 # lose last week's advice to the cut.
 _MAX_ADVICE_CHARS = 8000
-# What the prompt wraps last week's text in (see `ai._PREVIOUS_REPORT_BLOCK`).
+# What the prompt wraps last week's text in (see `ai._previous_report_block`).
 _BLOCK_MARKERS = ("<<<", ">>>")
+# Last week's report may be in either language - the chat's majority can change from one week to
+# the next - so a stored text is recognised by what it says in any of them.
+_NO_ADVICE_LINES = tuple(
+    line
+    for lang in i18n.LANGS
+    for line in (i18n.t(lang).WEEKLY_AI_FAILED, i18n.t(lang).WEEKLY_NO_DATA)
+)
+_HEADER_PREFIXES = tuple(i18n.t(lang).WEEKLY_HEADER.split("{", 1)[0].strip() for lang in i18n.LANGS)
 
 
 def previous_advice(text: str | None) -> str | None:
     """Last week's stored report reduced to what the model should follow up on, or None.
 
-    A numbers-only fallback (`i18n.WEEKLY_AI_FAILED`) and a no-data report (`i18n.WEEKLY_NO_DATA`)
-    carry no advice, so they count as no previous report at all: handing one over would only
-    invite the model to follow up on advice nobody gave. The header line is our own date range,
-    not the model's words, and is dropped; so is every "<<<" and ">>>".
+    A numbers-only fallback (`WEEKLY_AI_FAILED`) and a no-data report (`WEEKLY_NO_DATA`), in any
+    language, carry no advice, so they count as no previous report at all: handing one over would
+    only invite the model to follow up on advice nobody gave. The header line (any language's
+    `WEEKLY_HEADER`) is our own date range, not the model's words, and is dropped; so is every
+    "<<<" and ">>>".
+
+    Those two are told apart by position - the first line under the header - never by a substring
+    anywhere: "No entries this week." is a sentence a model may well write on one person's line,
+    and that must not throw the whole report's advice away.
     """
     if text is None or not text.strip():
         return None
-    if i18n.WEEKLY_AI_FAILED in text or i18n.WEEKLY_NO_DATA in text:
-        return None
-    header = i18n.WEEKLY_HEADER.split("{", 1)[0].strip()
     first, _, rest = text.strip().partition("\n")
-    advice = rest if first.startswith(header) else text
+    advice = rest if first.startswith(_HEADER_PREFIXES) else text
+    if advice.strip().partition("\n")[0].strip() in _NO_ADVICE_LINES:
+        return None
     # The cell is editable by hand, and a ">>>" inside it would close the prompt's data block early
     # and let the rest read as instructions. No report needs the markers, so they go - in a loop,
     # because cutting one out can join its neighbours into another ("<<>>><" -> "<<<") - and before

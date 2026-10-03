@@ -17,6 +17,7 @@ from bot import i18n
 from bot.ai import FoodEstimate, GeminiClient
 from bot.config import Settings
 from bot.handlers import ensure_user
+from bot.i18n import DEFAULT_LANG, Lang
 from bot.parsing import strip_yesterday
 from bot.reports import day_food
 from bot.scheduler import user_now
@@ -34,6 +35,7 @@ async def record_food(
     *,
     yesterday: bool = False,
     at: time | None = None,
+    lang: Lang = DEFAULT_LANG,
 ) -> None:
     """Reply with the estimate plus the day's total (this entry included) and store the row.
 
@@ -42,19 +44,20 @@ async def record_food(
     number covers. The row's `ts` says now - when it was typed - unless `at` states the time of
     the meal ("/їжа 14:00 борщ"): then `ts` is that clock on the meal's own day, with the offset
     the user's zone has on that date, so `/kcal` and the late-meal count read the stated time.
-    A time later than now is taken as stated.
+    A time later than now is taken as stated. The reply is in `lang`, the sender's language.
     """
+    strings = i18n.t(lang)
     now = user_now(user, settings)
     day = now.date() - timedelta(days=1) if yesterday else now.date()
     when = now if at is None else datetime.combine(day, at, tzinfo=now.tzinfo)
     before = await day_food(repo, user.user_id, day)
-    total_line = i18n.day_total(
+    total_line = strings.day_total(
         before.total_kcal + est.kcal,
         user.daily_kcal_target,
         day.isoformat() if yesterday else None,
     )
     reply = await message.reply(
-        i18n.food_estimate(
+        strings.food_estimate(
             est.dish,
             est.kcal,
             est.alcohol_kcal,
@@ -73,10 +76,11 @@ async def record_food(
 
 
 async def on_photo(
-    message: Message, bot: Bot, repo: SheetsRepo, ai: GeminiClient, settings: Settings
+    message: Message, bot: Bot, repo: SheetsRepo, ai: GeminiClient, settings: Settings, lang: Lang
 ) -> None:
-    # First, before anything costs us: when the vision quota is spent or the model is riding out
-    # a demand spike, paying for a photo download and a Sheets read only to hear it from Gemini
+    # First, before anything costs us (only the sender's language has been read, from the cached
+    # `users` tab): when the vision quota is spent or the model is riding out a demand spike,
+    # paying for a photo download and a fresh Sheets read only to hear it from Gemini
     # would be wasteful. With the Groq fallback configured this never raises: Groq can still
     # answer, so the photo is worth downloading after all.
     ai.check_available(ai.vision_model)
@@ -93,13 +97,22 @@ async def on_photo(
         buffer.getvalue(),
         "image/jpeg",
         caption or None,
-        on_retry=partial(message.reply, i18n.AI_RETRYING),
+        on_retry=partial(message.reply, i18n.t(lang).AI_RETRYING),
+        lang=lang,
     )
     if not est.is_food:
-        await message.reply(i18n.FOOD_NOT_FOOD)
+        await message.reply(i18n.t(lang).FOOD_NOT_FOOD)
         return
     await record_food(
-        message, user, est, repo, settings, "photo", largest.file_id, yesterday=yesterday
+        message,
+        user,
+        est,
+        repo,
+        settings,
+        "photo",
+        largest.file_id,
+        yesterday=yesterday,
+        lang=lang,
     )
 
 

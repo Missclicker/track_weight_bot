@@ -4,6 +4,7 @@ and scripted stand-ins for the Gemini and Groq SDK calls.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 import math
@@ -20,6 +21,7 @@ from bot import ai
 from bot.ai import FoodEstimate
 from bot.config import Settings
 from bot.fallback import GroqClient
+from bot.i18n import DEFAULT_LANG, Lang
 from bot.sheets import HEADERS, User, WaterSubscription, _parse_ts, num
 
 
@@ -37,6 +39,10 @@ class FakeRepo:
         return {tab: len(rows) for tab, rows in self.rows.items()}
 
     async def upsert_user(self, user: User) -> None:
+        # the language belongs to the person and survives a re-registration, as in the real repo
+        # (which keeps the cell on upsert and fills a blank one from the person's other rows)
+        # A copy, never the caller's object, and the stored value wins like the sheet's does.
+        user = dataclasses.replace(user, lang=self._stored_lang(user.user_id) or user.lang)
         self.users = [u for u in self.users if u.user_id != user.user_id] + [user]
 
     async def set_daily_kcal_target(self, user_id: int, chat_id: int, target: float | None) -> bool:
@@ -53,6 +59,18 @@ class FakeRepo:
         for user in mine:
             user.birth_year, user.sex, user.height_cm = birth_year, sex, height_cm
         return len(mine)
+
+    def _stored_lang(self, user_id: int) -> Lang | None:
+        return next((u.lang for u in self.users if u.user_id == user_id and u.lang), None)
+
+    async def set_lang(self, user_id: int, lang: Lang) -> int:
+        mine = [u for u in self.users if u.user_id == user_id]  # every chat, like the real repo
+        for user in mine:
+            user.lang = lang
+        return len(mine)
+
+    async def get_lang(self, user_id: int) -> Lang:
+        return self._stored_lang(user_id) or DEFAULT_LANG
 
     async def get_active_users(self, chat_id: int) -> list[User]:
         return [u for u in self.users if u.chat_id == chat_id and u.active]

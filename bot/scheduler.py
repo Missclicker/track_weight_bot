@@ -8,6 +8,10 @@ Water reminders use a single job instead: `water_tick` runs every minute and wal
 copy of the active subscriptions, so an arbitrary per-user interval costs no Sheets read and no
 job per subscriber. The copy is refreshed together with the ping jobs (startup and nightly) and
 whenever a handler changes a subscription.
+
+Nobody's message is being answered here, so every text picks its reader's language itself: a water
+reminder is a DM in its subscriber's, and the morning ping and the weekly report go out in the
+language of the chat (`Jobs.chat_lang`) - the owner's in a DM, most active members' in a group.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from apscheduler.triggers.cron import CronTrigger
 from bot import i18n
 from bot.ai import GeminiClient
 from bot.config import Settings
+from bot.i18n import DEFAULT_LANG, Lang
 from bot.parsing import is_water_due
 from bot.reports import build_weekly_payload, previous_advice, split_message
 from bot.sheets import SheetsRepo, User, WaterSubscription
@@ -89,6 +94,42 @@ class Jobs:
         self.scheduler = scheduler
         self._water: list[WaterSubscription] = []
 
+    # -- language ---------------------------------------------------------------------------
+
+    async def chat_lang(self, chat_id: int, users: list[User] | None = None) -> Lang:
+        """The language a message to the whole of `chat_id` is written in.
+
+        A DM belongs to one person, who reads it in their own language. A group reads one text
+        together, so it gets the language most of its active members chose: an unset one counts
+        as the default, and a tie goes to English (`i18n.majority_lang`). Somebody who left still
+        has a row but no longer reads the chat, so only active users vote. `users` is that chat's
+        active users when the caller has already read them, to spare a second read. A chat with
+        nobody active has cast no votes at all - not a tie between people - so it keeps the
+        default, as it did before English existed.
+        """
+        if is_personal_chat(chat_id):
+            return await self.repo.get_lang(chat_id)
+        if users is None:
+            users = await self.repo.get_active_users(chat_id)
+        if not users:
+            return DEFAULT_LANG
+        return i18n.majority_lang(u.lang for u in users)
+
+    async def _chat_lang_or_default(self, chat_id: int, users: list[User]) -> Lang:
+        """`chat_lang`, or the default language when it cannot be read.
+
+        With the roster in hand only a DM reads anything (its owner's language), and that read
+        must never cost the chat its ping or its weekly report: in the default language they
+        still say what they have to.
+        """
+        try:
+            return await self.chat_lang(chat_id, users)
+        except Exception:
+            log.warning(
+                "could not read the language of chat %s, using the default", chat_id, exc_info=True
+            )
+            return DEFAULT_LANG
+
     # -- morning ping -----------------------------------------------------------------------
 
     async def refresh_ping_jobs(self) -> None:
@@ -122,19 +163,20 @@ class Jobs:
         """Mention everyone in `zone` who has no weight entry for today."""
         today = datetime.now(ZoneInfo(zone)).date()
         for chat_id in self.settings.allowed_chat_ids:
-            users = [
-                u
-                for u in await self.repo.get_active_users(chat_id)
-                if user_tz(u, self.settings).key == zone
-            ]
+            active = await self.repo.get_active_users(chat_id)
+            users = [u for u in active if user_tz(u, self.settings).key == zone]
             if not users:
                 continue
             weighed = await self.repo.weights_for_date(chat_id, today)
             missing = [u for u in users if u.user_id not in weighed]
             if not missing:
                 continue
+            # The whole chat reads the ping, not just the people it mentions, so it is in the
+            # chat's language - voted on by every active member, whatever their zone - which costs
+            # no read beyond the roster already in hand.
+            lang = await self._chat_lang_or_default(chat_id, active)
             mentions = ", ".join(i18n.mention(u.user_id, u.name) for u in missing)
-            await self.bot.send_message(chat_id, i18n.PING.format(mentions=mentions))
+            await self.bot.send_message(chat_id, i18n.t(lang).PING.format(mentions=mentions))
             log.info("pinged %d users in chat %s", len(missing), chat_id)
 
     # -- water reminders --------------------------------------------------------------------
@@ -155,12 +197,29 @@ class Jobs:
                 local = now.astimezone(zone_or_default(sub.tz, self.settings))
                 if not is_water_due(sub.schedule, local):
                     continue
-                await self.bot.send_message(sub.user_id, i18n.WATER_PING)
+                lang = await self._water_lang(sub.user_id)
+                await self.bot.send_message(sub.user_id, i18n.t(lang).WATER_PING)
             except Exception as exc:
                 if is_unreachable_chat(exc):
                     await self._drop_unreachable(sub.user_id)
                 else:
                     log.exception("water reminder failed for user %s", sub.user_id)
+
+    async def _water_lang(self, user_id: int) -> Lang:
+        """The subscriber's language, or the default when it cannot be read.
+
+        Caught here rather than by the tick's handler: a reminder in the default language beats
+        none at all, and a failed lookup must never be mistaken for a failed send.
+        """
+        try:
+            return await self.repo.get_lang(user_id)
+        except Exception:
+            log.warning(
+                "water: could not read the language of user %s, using the default",
+                user_id,
+                exc_info=True,
+            )
+            return DEFAULT_LANG
 
     async def _drop_unreachable(self, user_id: int) -> None:
         """The user blocked the bot or deleted the private chat - stop trying.
@@ -215,10 +274,17 @@ class Jobs:
         today = today or datetime.now(self.settings.tzinfo).date()
         week_end = today - timedelta(days=1)
         week_start = week_end - timedelta(days=6)
-        payload = await build_weekly_payload(self.repo, chat_id, week_start)
-        header = i18n.WEEKLY_HEADER.format(start=week_start.isoformat(), end=week_end.isoformat())
+        # one roster read serves both the payload and a group's language vote
+        users = await self.repo.get_active_users(chat_id)
+        payload = await build_weekly_payload(self.repo, chat_id, week_start, users)
+        # like last week's report below, a failed language read degrades instead of failing
+        lang = await self._chat_lang_or_default(chat_id, users)
+        strings = i18n.t(lang)
+        header = strings.WEEKLY_HEADER.format(
+            start=week_start.isoformat(), end=week_end.isoformat()
+        )
         if not payload["users"]:
-            text = f"{header}\n{i18n.WEEKLY_NO_DATA}"
+            text = f"{header}\n{strings.WEEKLY_NO_DATA}"
         else:
             try:
                 previous = previous_advice(await self.repo.get_previous_report(chat_id, week_start))
@@ -233,13 +299,16 @@ class Jobs:
                 # deliberately no `on_retry` notice: this is a background job, nobody is waiting
                 # on it, and a failure already degrades to the numbers-only fallback below
                 body = await self.ai.weekly_report(
-                    payload, personal=is_personal_chat(chat_id), previous_report=previous
+                    payload,
+                    personal=is_personal_chat(chat_id),
+                    previous_report=previous,
+                    lang=lang,
                 )
                 text = f"{header}\n\n{body}"
             except Exception:
                 log.exception("Gemini weekly report failed, sending numbers only")
-                stats = "\n".join(i18n.weekly_stats_block(u) for u in payload["users"])
-                text = f"{header}\n{i18n.WEEKLY_AI_FAILED}\n\n{stats}"
+                stats = "\n".join(strings.weekly_stats_block(u) for u in payload["users"])
+                text = f"{header}\n{strings.WEEKLY_AI_FAILED}\n\n{stats}"
         # A group report can outgrow one Telegram message, so every text - AI, numbers-only or
         # no-data - goes out in pieces, in order, and only the first carries the header. It is
         # still one report, stored once and whole: that is what next week's follow-up reads back.

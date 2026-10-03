@@ -133,8 +133,23 @@ async def test_weekly_payload_no_users(repo: FakeRepo) -> None:
     assert payload["users"] == []
 
 
+async def test_weekly_payload_takes_a_roster_already_read(repo: FakeRepo, user: User) -> None:
+    """The scheduler reads the active users once, for the payload and the language vote alike."""
+    await repo.upsert_user(user)
+    await repo.add_food(user, _food(1800), _dt(date(2026, 9, 2)), "text", 1)
+    expected = await build_weekly_payload(repo, user.chat_id, date(2026, 9, 1))
+
+    async def no_reads(chat_id: int) -> list[User]:
+        raise AssertionError("the roster was passed in")
+
+    repo.get_active_users = no_reads  # type: ignore[method-assign]
+    payload = await build_weekly_payload(repo, user.chat_id, date(2026, 9, 1), [user])
+    assert payload == expected
+    assert payload["users"][0]["kcal_total"] == 1800
+
+
 def test_weekly_stats_block_formats_delta() -> None:
-    block = i18n.weekly_stats_block(
+    block = i18n.uk.weekly_stats_block(
         {
             "name": "Олексій <b>",
             "kcal_total": 3000,
@@ -538,13 +553,13 @@ def test_weekly_stats_block_shows_protein() -> None:
         "weight_delta": None,
         "protein_g_avg_per_day": 100,
     }
-    with_target = i18n.weekly_stats_block({**base, "protein_target_g_per_day": 120})
+    with_target = i18n.uk.weekly_stats_block({**base, "protein_target_g_per_day": 120})
     assert "; білок ≈100 г/день (норма 120 г)" in with_target
-    without = i18n.weekly_stats_block({**base, "protein_target_g_per_day": None})
+    without = i18n.uk.weekly_stats_block({**base, "protein_target_g_per_day": None})
     assert "білок ≈100 г/день" in without
     assert "норма" not in without
     # nothing logged to eat: no protein part at all, like the kcal average
-    no_food = i18n.weekly_stats_block({**base, "days_with_food_logged": 0, "kcal_total": 0})
+    no_food = i18n.uk.weekly_stats_block({**base, "days_with_food_logged": 0, "kcal_total": 0})
     assert "білок" not in no_food
 
 
@@ -574,7 +589,9 @@ async def test_day_food_survives_a_row_without_a_timestamp(repo: FakeRepo, user:
 
 # -- previous_advice ---------------------------------------------------------------------------
 
-HEADER = i18n.WEEKLY_HEADER.format(start="2026-08-31", end="2026-09-06")
+HEADER = i18n.uk.WEEKLY_HEADER.format(start="2026-08-31", end="2026-09-06")
+# a chat's language can change from one week to the next, so last week's text may be in either one
+EN_HEADER = i18n.en.WEEKLY_HEADER.format(start="2026-08-31", end="2026-09-06")
 
 
 @pytest.mark.parametrize("text", [None, "", "  \n\t "])
@@ -597,14 +614,33 @@ def test_previous_advice_keeps_a_text_without_a_header() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        f"{HEADER}\n{i18n.WEEKLY_AI_FAILED}\n\nОлексій: 12600 ккал за тиждень",
-        f"{HEADER}\n{i18n.WEEKLY_NO_DATA}",
+        f"{HEADER}\n{i18n.uk.WEEKLY_AI_FAILED}\n\nОлексій: 12600 ккал за тиждень",
+        f"{HEADER}\n{i18n.uk.WEEKLY_NO_DATA}",
         HEADER,  # a header and nothing else carries no advice either
+        f"{EN_HEADER}\n{i18n.en.WEEKLY_AI_FAILED}\n\nOleksii: 12600 kcal this week",
+        f"{EN_HEADER}\n{i18n.en.WEEKLY_NO_DATA}",
+        EN_HEADER,
     ],
-    ids=["numbers-only", "no-data", "header-only"],
+    ids=["numbers-only", "no-data", "header-only", "en-numbers-only", "en-no-data", "en-header"],
 )
 def test_previous_advice_skips_reports_without_advice(text: str) -> None:
     assert previous_advice(text) is None
+
+
+def test_previous_advice_keeps_a_report_that_merely_quotes_a_marker() -> None:
+    body = (
+        f"Bob\nEnergy: 1850 kcal/day\nActivity: {i18n.en.WEEKLY_NO_DATA}\n"
+        "This week:\n- 30 g protein at breakfast"
+    )
+    assert previous_advice(f"{EN_HEADER}\n\n{body}") == body
+
+
+def test_previous_advice_drops_an_english_header_line() -> None:
+    text = f"{EN_HEADER}\n\nOleksii\nProtein: 95 g/day\n- 30 g of protein at breakfast\n"
+    assert previous_advice(text) == "Oleksii\nProtein: 95 g/day\n- 30 g of protein at breakfast"
+    # and only as the first line, like the Ukrainian one
+    later = f"- more vegetables\n{EN_HEADER}"
+    assert previous_advice(later) == later
 
 
 def test_previous_advice_is_capped() -> None:

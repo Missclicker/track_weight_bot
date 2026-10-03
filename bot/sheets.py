@@ -7,7 +7,7 @@ blocking call in a worker thread so handlers never block the event loop. Transie
 Tab layout (headers must match the README):
 
     users   user_id, chat_id, name, username, tz, active, joined_at, height_cm, target_kg,
-            daily_kcal_target, birth_year, sex
+            daily_kcal_target, birth_year, sex, lang
     weight  ts, date, user_id, name, kg, source
     food    ts, date, user_id, name, dish, kcal, alcohol_kcal, protein_g, fat_g, carbs_g,
             veg_share, confidence, source, message_id, corrected, photo_file_id, portion
@@ -35,6 +35,7 @@ from gspread.utils import ValueRenderOption
 
 from bot.ai import FoodEstimate
 from bot.config import WEEKDAYS, Settings, parse_hhmm
+from bot.i18n import DEFAULT_LANG, Lang, normalize_lang
 from bot.parsing import WATER_MAX_INTERVAL_MIN, WATER_MIN_INTERVAL_MIN, WaterSchedule, parse_sex
 
 log = logging.getLogger(__name__)
@@ -61,6 +62,8 @@ HEADERS: dict[str, list[str]] = {
         # the person's profile for the weekly report, trailing like `food.portion` below
         "birth_year",
         "sex",
+        # the person's language ("uk" / "en", blank = the default), trailing like the profile
+        "lang",
     ],
     "weight": ["ts", "date", "user_id", "name", "kg", "source"],
     "food": [
@@ -132,6 +135,7 @@ class User:
     daily_kcal_target: float | None = None
     birth_year: int | None = None
     sex: str | None = None  # "m" / "f"
+    lang: Lang | None = None  # "uk" / "en"; None = never chosen, which reads as DEFAULT_LANG
 
     def to_row(self) -> list[Any]:
         return [
@@ -147,6 +151,7 @@ class User:
             _blank(self.daily_kcal_target),
             _blank(self.birth_year),
             self.sex or "",
+            self.lang or "",
         ]
 
     @classmethod
@@ -168,6 +173,8 @@ class User:
             daily_kcal_target=num_or_none(rec.get("daily_kcal_target")),
             birth_year=None if year is None else int(year),
             sex=parse_sex(rec.get("sex")),
+            # hand-typed "EN" or "English" count, anything unrecognised reads as unset
+            lang=normalize_lang(rec.get("lang")),
         )
 
 
@@ -429,17 +436,17 @@ class SheetsRepo:
             if rec.get("user_id"):
                 user = User.from_record(rec)
                 by_key[(user.user_id, user.chat_id)] = user
-        # A person has a row per chat (the group and the DM), but the profile describes the
-        # person, not one membership: a blank profile cell - a DM row registered after the
+        # A person has a row per chat (the group and the DM), but the profile and the language
+        # describe the person, not one membership: a blank cell - a DM row registered after the
         # profile was set, a cell typed into the group row only - is filled from the person's
         # other rows (the row's own value wins, then the first one in sheet order). Otherwise
-        # that chat answers "no profile", and `/profile 45` sent there merges the blanks and
-        # `set_profile` writes them over the other row. Per-chat columns (`daily_kcal_target`,
-        # `tz`, ...) stay apart.
-        profile_fields = ("birth_year", "sex", "height_cm")
+        # that chat answers "no profile" or speaks the default language, and `/profile 45` sent
+        # there merges the blanks and `set_profile` writes them over the other row. Per-chat
+        # columns (`daily_kcal_target`, `tz`, ...) stay apart.
+        person_fields = ("birth_year", "sex", "height_cm", "lang")
         known: dict[tuple[int, str], Any] = {}
         for user in by_key.values():
-            for field in profile_fields:
+            for field in person_fields:
                 if getattr(user, field) is not None:
                     known.setdefault((user.user_id, field), getattr(user, field))
         # copies, filled only once `known` is complete: a filled-in value never counts as own
@@ -448,7 +455,7 @@ class SheetsRepo:
                 user,
                 **{
                     field: known.get((user.user_id, field))
-                    for field in profile_fields
+                    for field in person_fields
                     if getattr(user, field) is None
                 },
             )
@@ -474,7 +481,7 @@ class SheetsRepo:
                 and existing[0] == str(user.user_id)
                 and existing[1] == str(user.chat_id)
             ):
-                # keep manually edited columns (tz, targets, profile) unless the caller set them
+                # keep manually edited columns (targets, profile, lang), and tz unless given
                 merged = User.from_record(dict(zip(HEADERS["users"], existing, strict=False)))
                 merged.chat_id = user.chat_id
                 merged.name = user.name
@@ -546,6 +553,43 @@ class SheetsRepo:
         hand-edited columns stay as they are; the caller passes the full state it wants.
         """
         return await self._run(self._set_profile_sync, user_id, birth_year, sex, height_cm)
+
+    def _set_lang_sync(self, user_id: int, lang: Lang) -> int:
+        ws = self._ws("users")
+        rows = with_retry(ws.get_all_values)
+        col = HEADERS["users"].index("lang") + 1
+        matched = [
+            idx
+            for idx, existing in enumerate(rows[1:], start=2)
+            if existing and existing[0] == str(user_id)
+        ]
+        if not matched:
+            return 0
+        data = [
+            {"range": gspread.utils.rowcol_to_a1(idx, col), "values": [[lang]]} for idx in matched
+        ]
+        with_retry(ws.batch_update, data)
+        self._users_cache = None
+        return len(matched)
+
+    async def set_lang(self, user_id: int, lang: Lang) -> int:
+        """Write the person's language on every `users` row of `user_id`, like `set_profile`;
+        returns the rows updated.
+
+        Only the `lang` cells are written. A person without a row is left alone (0): callers
+        register the sender first, and a language for nobody has nowhere to live.
+        """
+        return await self._run(self._set_lang_sync, user_id, lang)
+
+    async def get_lang(self, user_id: int) -> Lang:
+        """The person's language from any of their rows; DEFAULT_LANG when unset or unknown.
+
+        Served from the cached users tab, so a handler can ask on every message.
+        """
+        users = await self._run(self._all_users_sync)
+        return next(
+            (u.lang for u in users if u.user_id == user_id and u.lang is not None), DEFAULT_LANG
+        )
 
     # -- water reminders --------------------------------------------------------------------
 

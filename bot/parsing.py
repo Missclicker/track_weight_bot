@@ -21,12 +21,13 @@ _TIME = re.compile(r"\d{1,2}:\d{2}")
 _DATE = re.compile(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}-\d{2}-\d{2}")
 _PHONE = re.compile(r"^\+?\d[\d\s\-()]{6,}$")
 
-# A correction is a bare kcal number, optionally with a unit: "650", "650 ккал", "≈650", "1 200"
+# A correction is a bare kcal number, optionally with a unit: "650", "650 ккал", "≈650", "1 200",
+# "650 kcal", "650 cal", "650 calories"
 _CORRECTION = re.compile(
     r"""^\s*≈?\s*
     (?P<num>\d{1,2}(?:[\ \u00a0]\d{3})|\d{1,5})   # "650" or "1 200" (space / nbsp thousands)
     (?:[.,]\d)?                                     # a stray decimal is tolerated
-    \s*(?:ккал|kcal|кал|калорій)?\.?\s*$""",
+    \s*(?:ккал|kcal|кал|калорій|kcals|calories|calorie|cals?)?\.?\s*$""",
     re.IGNORECASE | re.VERBOSE,
 )
 _MAX_CORRECTION_KCAL = 10_000
@@ -80,7 +81,9 @@ def parse_correction(text: str | None) -> float | None:
 
 
 KCAL_TARGET_MIN, KCAL_TARGET_MAX = 500, 10_000
-# "/ціль стоп" and friends clear the daily target
+# "/ціль стоп" and friends clear the daily target - and, through the same predicate, the profile
+# ("/профіль стоп"). Whole-message only, so English "no" and "none" are never read out of a
+# sentence.
 TARGET_CLEAR_WORDS = frozenset(
     {
         "0",
@@ -94,6 +97,12 @@ TARGET_CLEAR_WORDS = frozenset(
         "off",
         "reset",
         "clear",
+        "stop",
+        "remove",
+        "delete",
+        "unset",
+        "none",
+        "no",
     }
 )
 
@@ -132,19 +141,33 @@ _PROFILE_FILLERS = frozenset(
         "року",
         "р",
         "народження",
-        "born",
-        "year",
-        "age",
         "вік",
         "років",
         "роки",
         "р.н",  # "1981 р.н.": the trailing dot is stripped off the token first
         "н",  # ... and "1981 р. н.", spaced
         "зріст",
-        "height",
         "стать",
-        "sex",
         "см",
+        # the English labels: "year of birth 1981", "born 1981", "age 45", "aged 45",
+        # "45 years old", "45 yrs", "45 y.o." (dot stripped as above), "180 cm tall", "gender f"
+        "born",
+        "birth",
+        "year",
+        "of",
+        "yr",
+        "age",
+        "aged",
+        "years",
+        "yrs",
+        "old",
+        "y",
+        "yo",
+        "y.o",
+        "height",
+        "tall",
+        "sex",
+        "gender",
         "cm",
     }
 )
@@ -244,12 +267,45 @@ DELETE_WORDS = frozenset(
         "del",
         "cancel",
         "erase",
+        # Only English verbs that mean "throw the record away" and nothing else. No "drop", "skip"
+        # or "minus": those are how people edit the dish ("drop the sauce"), and although the
+        # whole-message rule rejects that sentence, "drop it" under an estimate is as likely to
+        # be about the ingredient just discussed as about the row.
+        "undo",
+        "scrap",
     }
 )
-# Whole-message phrases that ask for the same thing without a verb in them.
-DELETE_PHRASES = frozenset({"не моє", "це не моє", "не мій", "це не мій", "not mine"})
-# Words allowed to accompany a delete verb. Deliberately narrow: no "не" (so "не видали" stays a
-# refusal, not a deletion) and no ingredient or dish nouns.
+# Whole-message phrases that ask for the same thing without a verb in them. Matched against the
+# normalised text, which has its apostrophes removed: "that's not mine" is stored as "thats ...".
+DELETE_PHRASES = frozenset(
+    {
+        "не моє",
+        "це не моє",
+        "не мій",
+        "це не мій",
+        "not mine",
+        "not my food",
+        "this is not mine",
+        "that is not mine",
+        "thats not mine",
+        "it is not mine",
+        "its not mine",
+        # how a prompt or a just-sent record is called off in English; they name nothing to edit
+        "never mind",
+        "nevermind",
+        "nvm",
+        "forget it",
+        # "one" is whole-phrase only: as a filler it would make "remove one" - fewer pieces of
+        # the dish on the estimate - delete the whole record
+        "delete this one",
+        "remove this one",
+        "delete that one",
+        "remove that one",
+    }
+)
+# Words allowed to accompany a delete verb. Deliberately narrow: no "не"/"dont" (so "не видали"
+# and "don't delete" stay refusals, not deletions) and no ingredient or dish nouns - nor a word
+# like "item" that could name one.
 _DELETE_FILLERS = frozenset(
     {
         "цей",
@@ -268,17 +324,27 @@ _DELETE_FILLERS = frozenset(
         "the",
         "it",
         "entry",
+        "entries",
         "record",
+        "records",
+        "message",
         "please",
         "pls",
+        "plz",
     }
 )
-_WORD = re.compile(r"[\w'’ʼ]+")
+_WORD = re.compile(r"\w+")  # run on `_normalise` output, which has no apostrophes left
+# The apostrophes people type: ASCII, the typographic one phones substitute and the Ukrainian
+# modifier letter. All three are dropped, so "don't", "don’t" and "dont" are one token.
+_APOSTROPHES = re.compile(r"['’ʼ]")
 
 
 def _normalise(text: str) -> str:
-    """Lowercase, single-spaced, without the trailing punctuation people type when annoyed."""
-    return " ".join(text.strip().lower().split()).rstrip(".!?")
+    """Lowercase, single-spaced, without apostrophes or the trailing punctuation people type when
+    annoyed. No vocabulary entry carries an apostrophe, so dropping them changes no Ukrainian
+    match - it only lets the English contractions be stored once ("dont log")."""
+    lowered = _APOSTROPHES.sub("", text.strip().lower())
+    return " ".join(lowered.split()).rstrip(".!?")
 
 
 def is_delete_request(text: str | None) -> bool:
@@ -333,11 +399,75 @@ FOOD_CANCEL_PHRASES = frozenset(
         "це помилка",
         "помилково",
         "я помилково",
+        # English, in the normalised spelling (apostrophes dropped: "don't" -> "dont").
+        # "не записуй / не рахуй (це)": every "don't <verb> [this]" form, written out below.
+        *(
+            f"{neg} {verb}{obj}"
+            for neg in ("dont", "do not")
+            for verb in ("log", "record", "count", "save", "track")
+            for obj in ("", " this", " that", " it")
+        ),
+        "no need to log",
+        "no need to log this",
+        "no need to record",
+        "no need to record this",
+        # "жарт", "жартую"
+        "joke",
+        "a joke",
+        "just a joke",
+        "its a joke",
+        "it was a joke",
+        "that was a joke",
+        "joking",
+        "just joking",
+        "im joking",
+        "i was joking",
+        "kidding",
+        "just kidding",
+        "im kidding",
+        "i was kidding",
+        "jk",
+        # "випадково (відправив)"
+        "accident",
+        "an accident",
+        "by accident",
+        "it was an accident",
+        "accidentally",
+        "accidentally sent",
+        "i accidentally sent",
+        "i accidentally sent it",
+        "i accidentally sent this",
+        "sent by accident",
+        "sent it by accident",
+        "sent this by accident",
+        "i sent it by accident",
+        "i sent this by accident",
+        # "помилка", "помилково"
+        "mistake",
+        "a mistake",
+        "my mistake",
+        "its a mistake",
+        "it was a mistake",
+        "that was a mistake",
+        "by mistake",
+        "sent by mistake",
+        "sent it by mistake",
+        "i sent it by mistake",
+        "my bad",
+        "oops",
+        "oops wrong photo",
+        # Only the picture itself: "wrong dish" or "wrong food" may just as well say the model
+        # misread a right photo, which is a correction.
+        "wrong photo",
+        "wrong picture",
+        "wrong pic",
+        "wrong image",
     }
 )
 # Tolerated at either end of any of those phrases, the way `_DELETE_FILLERS` tolerates them
 # around a delete verb: "будь ласка, не записуй" and "не записуй, будь ласка" are the same ask.
-_POLITENESS = frozenset({"будь", "ласка", "плз", "пліз", "please", "pls"})
+# "sorry" goes with them ("sorry, wrong photo"): alone it strips to nothing and matches nothing.
+_POLITENESS = frozenset({"будь", "ласка", "плз", "пліз", "please", "pls", "plz", "sorry"})
 
 
 def is_food_cancel_request(text: str | None) -> bool:
@@ -460,18 +590,20 @@ class WaterSchedule:
 
 
 # "кожні 30 хвилин", "кожні 30 хв", "кожну годину", "кожні 2 години", "раз на годину",
-# "через 30 хвилин", "every 30 min", "every hour", "every 2 hours"
+# "через 30 хвилин", "every 30 min", "each 30 min", "every hour", "every 2 hours",
+# "once an hour", and the one-word "hourly" / "half-hourly"
 _WATER_EVERY = re.compile(
-    r"""(?:кожн\w*|раз\s+(?:на|в)|через|every)\s*
+    r"""(?:(?:кожн\w*|раз\s+(?:на|в)|через|\b(?:every|each|once\s+an?))\s*
     (?:(?P<num>\d{1,3})\s*)?
-    (?P<unit>хвилин\w*|хв|мін\w*|годин\w*|год|minutes?|mins?|m|hours?|hrs?|h)\b""",
+    (?P<unit>хвилин\w*|хв|мін\w*|годин\w*|год|minutes?|mins?|m|hours?|hrs?|h)\b
+    |\b(?P<half>half[\s-]?)?hourly\b)""",
     re.IGNORECASE | re.VERBOSE,
 )
-# "з 9 до 18", "з 9:30 до 18:00", "від 9 до 18", "from 9 to 18"
+# "з 9 до 18", "з 9:30 до 18:00", "від 9 до 18", "from 9 to 18", "between 9 and 18"
 _WATER_WINDOW = re.compile(
-    r"""\b(?:з|із|від|from)\s*
+    r"""\b(?:з|із|від|from|between)\s*
     (?P<h1>\d{1,2})(?::(?P<m1>\d{2}))?\s*
-    (?:до|to|[-–—])\s*
+    (?:до|to|till|until|and|[-–—])\s*
     (?P<h2>\d{1,2})(?::(?P<m2>\d{2}))?""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -482,22 +614,33 @@ _WATER_WINDOW_DASH = re.compile(
     re.VERBOSE,
 )
 _WATER_DAY_GROUPS: tuple[tuple[re.Pattern[str], frozenset[int]], ...] = (
-    (re.compile(r"будн|weekday|робоч\w*\s+дн", re.IGNORECASE), WATER_WEEKDAYS),
+    (
+        re.compile(
+            r"будн|weekday|робоч\w*\s+дн|work(?:ing)?\s*days?|business\s+days?", re.IGNORECASE
+        ),
+        WATER_WEEKDAYS,
+    ),
     (re.compile(r"вихідн|weekend", re.IGNORECASE), WATER_WEEKEND),
     (
-        re.compile(r"щодн|щоденно|кожн\w*\s+(?:дн|день)|every\s+day|daily", re.IGNORECASE),
+        re.compile(r"щодн|щоденно|кожн\w*\s+(?:дн|день)|(?:every|each)\s*day|daily", re.IGNORECASE),
         WATER_ALL_DAYS,
     ),
 )
-# abbreviations, full names ("вівторок", "п'ятниці", "thursday") and the two-letter Ukrainian forms
+# abbreviations, full names ("вівторок", "п'ятниці", "thursday", "tues"), English plurals
+# ("on mondays") and the two-letter Ukrainian forms
 _WATER_DAY = (
     r"(?:пн|вт|ср|чт|пт|сб|нд|вс|понеділ\w*|вівтор\w*|серед\w*|четвер\w*|п[’'ʼ]?ятниц\w*"
-    r"|субот\w*|неділ\w*|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?"
-    r"|sat(?:urday)?|sun(?:day)?)"
+    r"|субот\w*|неділ\w*|mon(?:days?)?|tue(?:s|sdays?)?|wed(?:s|nesdays?)?|thu(?:rs?|rsdays?)?"
+    r"|fri(?:days?)?|sat(?:urdays?)?|sun(?:days?)?)"
 )
 _WATER_DAY_TOKEN = re.compile(rf"\b({_WATER_DAY})\b", re.IGNORECASE)
-# "пн-пт", "mon - fri"; a range is expanded before single tokens are collected
-_WATER_DAY_RANGE = re.compile(rf"\b({_WATER_DAY})\s*[-–—]\s*({_WATER_DAY})\b", re.IGNORECASE)
+# "пн-пт", "mon - fri", "monday to friday"; a range is expanded before single tokens are
+# collected. The English connectors count only between two day names, and the window ("from 9
+# to 18") is cut out before the days are read, so its "to" can never join two days.
+_WATER_DAY_RANGE = re.compile(
+    rf"\b({_WATER_DAY})\s*(?:[-–—]|\s(?:to|through|thru|till|until)\s)\s*({_WATER_DAY})\b",
+    re.IGNORECASE,
+)
 # looked up by the first three characters of the matched token (apostrophes removed), so
 # "monday" == "mon" and "п'ятниця" == "пят"
 _WATER_DAY_NUMBERS = {
@@ -528,6 +671,8 @@ _WATER_DAY_NUMBERS = {
 
 def _water_interval(match: re.Match[str]) -> int | None:
     """Minutes between reminders, or None when outside the allowed range."""
+    if match.group("unit") is None:  # "hourly" / "half-hourly": the word is the whole interval
+        return 30 if match.group("half") else 60
     count = int(match.group("num") or 1)
     unit = match.group("unit").lower()
     minutes = count * 60 if unit.startswith(("год", "h")) else count
