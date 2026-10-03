@@ -5,12 +5,17 @@ Structured outputs use `response_mime_type="application/json"` with a pydantic s
 model's answer is validated (and clamped) before it reaches a handler. The weekly report is free
 text and the only call with a system instruction: the nutritionist it is written by.
 
-A failed call is retried (see `_generate`), with two exceptions. A 429 means the model's quota is
-spent, so the model is put into a cooldown and `QuotaExceeded` is raised at once. A 503 means the
-model is overloaded: it gets at most `_OVERLOAD_MAX_ATTEMPTS` of them before the same treatment -
-a short cooldown and `ModelOverloaded`.
+A failed Gemini call is retried (see `_generate_gemini`), with two exceptions. A 429 means the
+model's quota is spent, so the model is put into a cooldown and `QuotaExceeded` is raised at once.
+A 503 means the model is overloaded: it gets at most `_OVERLOAD_MAX_ATTEMPTS` of them before the
+same treatment - a short cooldown and `ModelOverloaded`.
 Both cooldowns are per model, because on the free tier the vision model's daily budget runs out
 long before the text one's - and text must keep working when photos no longer do.
+
+Those two outages - and only those - can be bridged: with a `GroqClient` (`bot/fallback.py`)
+configured, the same request goes to Groq once before either exception reaches the caller, and the
+outage is re-raised unchanged only when Groq fails too. Every other failure is ours or the
+request's (a bad key, a retired model, a deadline) and would not get better on another provider.
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from google import genai
@@ -31,6 +36,11 @@ from google.genai import types
 from pydantic import BaseModel, Field, field_validator
 
 from bot import met
+
+if TYPE_CHECKING:
+    # Only for the annotation: `GeminiClient` never builds a Groq client itself - `bot.__main__`
+    # does, when a key is configured, and hands it in.
+    from bot.fallback import GroqClient
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +54,10 @@ _RETRY_DELAYS_S = (1.5, 3.0)  # one per gap between attempts
 # client-side TimeoutError masks the server's informative 504. It stays only as a backstop.
 _TIMEOUT_GRACE_S = 5.0
 # 429 is deliberately absent: a spent quota is not transient within one call, and the quota path
-# in `_generate` owns it (cooldown + `QuotaExceeded`, never a retry). 503, by contrast, must stay
-# *in* here: the non-transient break in `_generate` runs behind the overload branch, so taking
-# 503 out would quietly turn the whole `ModelOverloaded` path off rather than make it stricter.
+# in `_generate_gemini` owns it (cooldown + `QuotaExceeded`, never a retry). 503, by contrast, must
+# stay *in* here: the non-transient break in `_generate_gemini` runs behind the overload branch, so
+# taking 503 out would quietly turn the whole `ModelOverloaded` path off rather than make it
+# stricter.
 _TRANSIENT_CODES = frozenset({408, 500, 502, 503, 504})
 _MAX_PORTION_CHARS = 40
 
@@ -100,7 +111,7 @@ except ImportError:  # pragma: no cover - httpx ships with google-genai
 else:
     _TRANSPORT_ERRORS += (httpx.TimeoutException, httpx.ConnectError)
 
-# ValueError is ours: an empty response body (see `_generate`).
+# ValueError is ours: an empty response body (see `_generate_gemini`).
 _RETRYABLE: tuple[type[Exception], ...] = (
     genai_errors.APIError,
     TimeoutError,
@@ -497,10 +508,16 @@ _PREVIOUS_REPORT_BLOCK = (
 class GeminiClient:
     """Thin async wrapper around `google.genai.Client`."""
 
-    def __init__(self, api_key: str, vision_model: str, text_model: str) -> None:
-        # `_generate` overrides this per attempt, so this value only reaches a call that carries
-        # no `http_options` of its own. Keep it at the shortest deadline: such a call gets no
-        # retry, and hanging on it for the *longest* deadline would be the wrong default.
+    def __init__(
+        self,
+        api_key: str,
+        vision_model: str,
+        text_model: str,
+        fallback: GroqClient | None = None,
+    ) -> None:
+        # `_generate_gemini` overrides this per attempt, so this value only reaches a call that
+        # carries no `http_options` of its own. Keep it at the shortest deadline: such a call gets
+        # no retry, and hanging on it for the *longest* deadline would be the wrong default.
         self._client = genai.Client(
             api_key=api_key,
             http_options=types.HttpOptions(timeout=int(_ATTEMPT_TIMEOUTS_S[0] * 1000)),
@@ -516,6 +533,9 @@ class GeminiClient:
         # a quota, unlike a spike, can be gone for the rest of the day). In memory for the same
         # reason as above, and even more safely: 30 s of state is not worth a restart's attention.
         self._overloads: dict[str, float] = {}
+        # Asked only once Gemini has given up on a call because of one of the two outages above;
+        # None keeps the behaviour of a bot without a Groq key exactly as it was.
+        self._fallback = fallback
 
     @property
     def vision_model(self) -> str:
@@ -582,7 +602,69 @@ class GeminiClient:
             return
         raise ModelOverloaded(model, left, self._is_vision_only_outage(model))
 
+    def check_available(self, model: str) -> None:
+        """Raise the outage that would stop a call to `model` before it starts; else return None.
+
+        For a call site that wants to skip costly preparation (a photo download) when the answer
+        is already known to be a refusal. With the Groq fallback configured nothing is known yet:
+        a cooling-down Gemini model is exactly the case Groq is there to answer.
+        """
+        if self._fallback is not None:
+            return
+        self.check_quota(model)
+        self.check_overload(model)
+
     async def _generate(
+        self,
+        model: str,
+        contents: list[Any],
+        schema: type[BaseModel] | None,
+        on_retry: RetryNotice | None = None,
+        *,
+        system_instruction: str | None = None,
+    ) -> str:
+        """Gemini first; on an overload or a spent quota, Groq once (if configured).
+
+        Only those two outages are handed over: they say Gemini cannot answer right now, not that
+        the request is wrong, so another provider may well answer it. A call made during either
+        cooldown raises on Gemini's attempt 0 without spending a request, and so goes straight to
+        Groq. `on_retry` stays with Gemini: the notice is about Gemini's ladder, and Groq gets a
+        single attempt with nothing to announce.
+        """
+        try:
+            return await self._generate_gemini(
+                model, contents, schema, on_retry, system_instruction=system_instruction
+            )
+        except (QuotaExceeded, ModelOverloaded) as outage:
+            if self._fallback is None:
+                raise
+            groq_model = self._fallback.model_for(contents)
+            log.warning(
+                "Gemini %s unavailable (%s), handing the call over to Groq %s",
+                model,
+                type(outage).__name__,
+                groq_model,
+            )
+            try:
+                raw = await self._fallback.generate(
+                    contents, schema, system_instruction=system_instruction
+                )
+                if schema is not None:
+                    # Validated here, not only by the public method: a malformed Groq answer must
+                    # count as a failed fallback (and end in the outage reply below), not surface
+                    # later as a generic "не вийшло" from `estimate_food`.
+                    schema.model_validate_json(raw)
+            except Exception as exc:
+                # No traceback: a second provider being down or answering badly while the first
+                # is out is the same kind of expected condition as the outage itself.
+                log.warning("Groq %s fallback failed too: %r", groq_model, exc)
+            else:
+                return raw
+            # The original outage, untouched (its `__cause__` is still Gemini's APIError, if it had
+            # one), so `on_error` words the reply exactly as it would without a fallback.
+            raise outage
+
+    async def _generate_gemini(
         self,
         model: str,
         contents: list[Any],

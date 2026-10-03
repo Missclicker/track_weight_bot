@@ -94,6 +94,8 @@ class FakeAI:
         self.food_estimates: list[FoodEstimate] = []  # answers for estimate_food, in order
         self.cooling: dict[str, tuple[float, bool]] = {}  # model -> (seconds left, per-day)
         self.overloaded: dict[str, float] = {}  # model -> seconds left of the 503 cooldown
+        # a configured Groq fallback: outages are answered instead of raised
+        self.has_fallback = False
 
     @property
     def vision_model(self) -> str:
@@ -114,6 +116,20 @@ class FakeAI:
         if seconds is not None:
             raise ModelOverloaded(model, seconds, model == self.vision_model)
 
+    def check_available(self, model: str) -> None:
+        # the real client: both checks, in the same order - none at all with a Groq fallback
+        if self.has_fallback:
+            return
+        self.check_quota(model)
+        self.check_overload(model)
+
+    def _check_call(self, model: str) -> None:
+        """What `_generate` does with an outage: raise it, unless Groq answers instead."""
+        if self.has_fallback:
+            return
+        self.check_quota(model)
+        self.check_overload(model)
+
     # `on_retry` is never invoked here - the retry loop itself is covered by `test_ai_retry.py`
     # and, end to end, by `test_food_estimate_warns_the_user_before_retrying` below. These fakes
     # only have to accept the keyword the handlers now pass.
@@ -126,8 +142,7 @@ class FakeAI:
     ) -> FoodEstimate:
         # the real client runs both checks inside `_generate`, for whichever model it picks
         model = self.vision_model if image_bytes is not None else self.text_model
-        self.check_quota(model)
-        self.check_overload(model)
+        self._check_call(model)
         self.estimate_calls.append(caption)
         return self.food_estimates.pop(0)
 
@@ -137,16 +152,14 @@ class FakeAI:
         correction: str,
         on_retry: RetryNotice | None = None,
     ) -> FoodEstimate:
-        self.check_quota(self.text_model)
-        self.check_overload(self.text_model)
+        self._check_call(self.text_model)
         self.revise_calls.append((str(previous["dish"]), correction))
         return FoodEstimate(dish="борщ з хлібом", kcal=720, carbs_g=60)
 
     async def parse_sport(
         self, text: str, weight_kg: float | None, on_retry: RetryNotice | None = None
     ) -> SportEntry | None:
-        self.check_quota(self.text_model)
-        self.check_overload(self.text_model)
+        self._check_call(self.text_model)
         self.sport_calls.append(text)
         return SportEntry(activity="running", title="біг", minutes=30, distance_km=5, kcal=390)
 
@@ -525,6 +538,34 @@ async def test_a_photo_is_refused_while_the_vision_model_is_overloaded(
     assert session.sent[-1]["text"] == i18n.AI_BUSY_PHOTO
     assert ai.estimate_calls == []
     assert repo.rows["food"] == []
+
+
+@pytest.mark.parametrize("outage", ["quota", "overload"])
+async def test_a_photo_is_estimated_during_a_vision_outage_with_a_groq_fallback(
+    harness, repo: FakeRepo, monkeypatch, outage: str
+) -> None:
+    """With Groq configured the precheck must not bail out: the photo is downloaded and estimated
+    (by Groq, inside the real client) and the meal is recorded."""
+    dp, bot, session, ai = harness
+    ai.has_fallback = True
+    if outage == "quota":
+        ai.cooling[ai.vision_model] = (7200.0, True)
+    else:
+        ai.overloaded[ai.vision_model] = 30.0
+    ai.food_estimates = [FoodEstimate(dish="борщ", kcal=400)]
+    downloads: list[Any] = []
+
+    async def fake_download(file: Any, destination: Any) -> None:
+        downloads.append(file)
+        destination.write(b"jpeg")
+
+    monkeypatch.setattr(bot, "download", fake_download)
+    await dp.feed_update(bot, _photo_update(caption="борщ"))
+
+    assert len(downloads) == 1
+    assert ai.estimate_calls == ["борщ"]
+    assert len(repo.rows["food"]) == 1
+    assert session.sent[-1]["text"].startswith(i18n.FOOD_PREFIX)
 
 
 async def test_a_correction_is_refused_while_the_text_quota_is_spent(

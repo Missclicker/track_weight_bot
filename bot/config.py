@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     gemini_api_key: str
     gemini_vision_model: str = "gemini-2.5-flash"
     gemini_text_model: str = "gemini-2.5-flash-lite"
+    # Optional: with a key, a call Gemini gives up on (overload or spent quota) goes to Groq once
+    # before the user hears about the outage. None turns the fallback off.
+    groq_api_key: str | None = None
+    groq_vision_model: str = "qwen/qwen3.8-27b"
+    groq_text_model: str = "openai/gpt-oss-120b"
     default_tz: str = "Europe/Kyiv"
     weigh_in_deadline: str = "11:00"
     weekly_report_day: str = "mon"
@@ -62,9 +67,11 @@ class Settings(BaseSettings):
             return {int(v) for v in value}
         raise ValueError("ALLOWED_CHAT_IDS must be a comma-separated list of integers")
 
-    @field_validator("google_service_account_json", mode="before")
+    @field_validator("google_service_account_json", "groq_api_key", mode="before")
     @classmethod
-    def _empty_json_is_none(cls, value: object) -> object:
+    def _blank_is_none(cls, value: object) -> object:
+        # `GROQ_API_KEY=` left empty in `.env` means "no fallback", not a key of "" that would
+        # switch the fallback on only to fail every request with a 401.
         return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("weigh_in_deadline", "weekly_report_time")

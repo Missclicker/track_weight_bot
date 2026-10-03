@@ -138,7 +138,8 @@ async def on_error(event: ErrorEvent) -> None:
     exception = event.exception
     if isinstance(exception, QuotaExceeded):
         # WARNING, not a traceback: a spent Gemini quota is an expected, self-healing condition
-        # of the free tier, and it gets a message that says what the user can still do.
+        # of the free tier, and it gets a message that says what the user can still do. With the
+        # Groq fallback on, either outage only gets here once Groq has failed too.
         log.warning(
             "Gemini %s is out of quota for another %.0f s (daily=%s)",
             exception.model,

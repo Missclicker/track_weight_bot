@@ -77,9 +77,9 @@ async def on_photo(
 ) -> None:
     # First, before anything costs us: when the vision quota is spent or the model is riding out
     # a demand spike, paying for a photo download and a Sheets read only to hear it from Gemini
-    # would be wasteful.
-    ai.check_quota(ai.vision_model)
-    ai.check_overload(ai.vision_model)
+    # would be wasteful. With the Groq fallback configured this never raises: Groq can still
+    # answer, so the photo is worth downloading after all.
+    ai.check_available(ai.vision_model)
     assert message.photo is not None
     largest = max(message.photo, key=lambda p: p.width * p.height)
     buffer = BytesIO()

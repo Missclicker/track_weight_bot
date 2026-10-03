@@ -1,20 +1,24 @@
 """Shared test fixtures: an in-memory repository with the same interface as `SheetsRepo`,
-and a scripted stand-in for the Gemini SDK call.
+and scripted stand-ins for the Gemini and Groq SDK calls.
 """
 
 from __future__ import annotations
 
 import functools
+import inspect
 import math
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from google.genai import errors as genai_errors
+from groq.resources.chat.completions import AsyncCompletions
 
 from bot import ai
 from bot.ai import FoodEstimate
 from bot.config import Settings
+from bot.fallback import GroqClient
 from bot.sheets import HEADERS, User, WaterSubscription, _parse_ts, num
 
 
@@ -323,9 +327,57 @@ def client_with(outcomes: list[Any]) -> tuple[ai.GeminiClient, FakeModels]:
     # silence the next one's calls. Start every test with both registers empty.
     client._cooldowns.clear()
     client._overloads.clear()
+    # ...and without a fallback, which `client_with_fallback` may have plugged in for the last one.
+    client._fallback = None
     models = FakeModels(outcomes)
     client._client = _Client(models)  # type: ignore[assignment]
     return client, models
+
+
+class FakeCompletions:
+    """Answers Groq's `chat.completions.create` from a scripted list and records every request.
+
+    A list item is either an exception (raised) or a string / None (the `message.content`).
+    """
+
+    def __init__(self, outcomes: list[Any]) -> None:
+        self.outcomes = outcomes
+        # the whole keyword dict of each call: model, messages, response_format, ...
+        self.requests: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> Any:
+        # Bound against the real SDK method first: a misspelt or retired field would make every
+        # production call raise `TypeError`, which `_generate` reports as just another failed
+        # fallback - so the tests must refuse it here instead of silently accepting it.
+        inspect.signature(AsyncCompletions.create).bind(None, **kwargs)
+        self.requests.append(kwargs)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=outcome))])
+
+    @property
+    def calls(self) -> int:
+        return len(self.requests)
+
+
+@functools.cache
+def _groq() -> GroqClient:
+    # Building `AsyncGroq` does no I/O, but there is no reason to pay for it in every test either:
+    # the SDK object is swapped out below, the same way `client_with` swaps Gemini's.
+    return GroqClient("test-groq-key", "groq-vision", "groq-text")
+
+
+def client_with_fallback(
+    gemini_outcomes: list[Any], groq_outcomes: list[Any]
+) -> tuple[ai.GeminiClient, FakeModels, FakeCompletions]:
+    """`client_with`, plus a Groq fallback answering `groq_outcomes`, plus both recorders."""
+    client, models = client_with(gemini_outcomes)
+    groq = _groq()
+    completions = FakeCompletions(groq_outcomes)
+    groq._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))  # type: ignore[assignment]
+    client._fallback = groq
+    return client, models, completions
 
 
 def server_error(code: int = 504) -> genai_errors.APIError:

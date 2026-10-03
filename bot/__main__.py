@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from bot.ai import GeminiClient
 from bot.config import Settings
+from bot.fallback import GroqClient
 from bot.handlers import build_router
 from bot.scheduler import build_scheduler
 from bot.sheets import SheetsRepo, explain_startup_error
@@ -53,8 +54,23 @@ async def main() -> None:
         sys.exit(2)
     log.info("sheet ready: %s", ", ".join(f"{k}={v}" for k, v in counts.items()))
 
+    fallback: GroqClient | None = None
+    if settings.groq_api_key:
+        fallback = GroqClient(
+            settings.groq_api_key, settings.groq_vision_model, settings.groq_text_model
+        )
+        log.info(
+            "Groq fallback on: vision %s, text %s",
+            settings.groq_vision_model,
+            settings.groq_text_model,
+        )
+    else:
+        log.info("Groq fallback off (no GROQ_API_KEY)")
     ai = GeminiClient(
-        settings.gemini_api_key, settings.gemini_vision_model, settings.gemini_text_model
+        settings.gemini_api_key,
+        settings.gemini_vision_model,
+        settings.gemini_text_model,
+        fallback=fallback,
     )
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     scheduler, jobs = build_scheduler(bot, repo, ai, settings)

@@ -2,12 +2,14 @@
 
 A single Python process, long-polling Telegram, storing everything in one Google Spreadsheet and
 calling Gemini for the parts that need judgement (what is on the plate, what a sport sentence
-means, how the week went).
+means, how the week went) - and, optionally, Groq for the same calls while Gemini is out.
 
 ```
 Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thread pool)
                                     |
                                     +--->  Gemini API (google-genai, async client)
+                                    |         |  overload / spent quota only
+                                    |         +--->  Groq API (groq, async client; optional)
                                     |
                                APScheduler (morning ping, water reminders, weekly report)
 ```
@@ -17,12 +19,13 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | module | responsibility |
 |---|---|
 | `bot/__main__.py` | Entry point. Loads settings (fails fast with a readable message), ensures the sheet schema, builds `Bot`/`Dispatcher`, injects dependencies, starts the scheduler and polling. |
-| `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist. |
+| `bot/config.py` | `Settings` (pydantic-settings). Parses `ALLOWED_CHAT_IDS`, validates `HH:MM` times, weekday, timezone and that Google credentials exist; a blank `GOOGLE_SERVICE_ACCOUNT_JSON` or `GROQ_API_KEY` reads as unset. |
 | `bot/i18n.py` | Every user-facing string, in Ukrainian. Formatting helpers escape HTML. |
 | `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `parse_profile` (birth year or age, sex and height in any order, all-or-nothing, + the `ProfileUpdate` value object) / `parse_sex` (a typed word or a `users.sex` cell -> `"m"`/`"f"`), `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `strip_meal_time` (takes a leading or trailing `H:MM` / `H-MM` off a `/їжа` text as the meal time), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace) and `kcal = MET * kg * h`. |
 | `bot/nutrition.py` | Pure numbers for the weekly report, None in -> None out: `age_on`, the age-based `protein_g_per_kg` and the `reference_weight` it multiplies, `bmi`, `bmr_mifflin` (Mifflin-St Jeor), `maintenance_kcal` (sedentary BMR + logged sport) and `energy_shares` (see *Nutrition numbers* below). |
-| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report` (the only call with a role: `REPORT_SYSTEM_INSTRUCTION` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). |
+| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report` (the only call with a role: `REPORT_SYSTEM_INSTRUCTION` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). `_generate` wraps the Gemini ladder (`_generate_gemini`) and, when a `GroqClient` was passed in as `fallback`, hands the call to Groq on either outage; `check_available` is the photo precheck that knows about it (see *Groq fallback*). |
+| `bot/fallback.py` | `GroqClient`: one Groq chat completion for a Gemini-shaped call - prompt strings and image `Part`s translated into chat content parts, the vision or text model picked by whether an image is present, a non-strict `json_schema` response format for a pydantic schema, reasoning kept out of the answer. Single attempt, no cooldowns (see *Groq fallback*). Not named `groq.py`, which would shadow the SDK. |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
 | `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini: per person the week's totals and per-logged-day averages, energy shares, a `days` list, late meals, the `nutrition.py` numbers and a `previous_week` block, both weeks measured by the one `_window_numbers`; three `user_rows_between` reads per person, split into the two windows in memory - see *Nutrition numbers*); two pure helpers for the report text: `previous_advice` (last week's stored report minus its header and the prompt's `<<<`/`>>>` markers, or None when it carries no advice) and `split_message` (Telegram-sized pieces of at most 4000 characters). |
@@ -254,8 +257,8 @@ drops it from memory; any other send error is logged and the remaining subscribe
 Telegram refuses a DM to a user who never pressed Start, so the handler sends the confirmation
 message first and stores the subscription only when it went through.
 
-**Gemini retries.** `GeminiClient._generate` makes up to three attempts (`_ATTEMPT_TIMEOUTS_S`)
-with backoff sleeps of 1.5 s and 3 s, the same shape as `sheets.with_retry`. The deadline
+**Gemini retries.** `GeminiClient._generate_gemini` makes up to three attempts
+(`_ATTEMPT_TIMEOUTS_S`) with backoff sleeps of 1.5 s and 3 s, the same shape as `sheets.with_retry`. The deadline
 *escalates* per attempt - 45 s, 75 s, 120 s - because the SDK turns `http_options.timeout` into an
 `X-Server-Timeout` header: Google's backend enforces our own deadline and answers
 `504 DEADLINE_EXCEEDED` when the model needs longer, so retrying with the same 45 s during busy
@@ -268,7 +271,7 @@ transport failures (both arrive transitively, so the imports are guarded); 400/4
 after one attempt - a bad key or a retired model will not fix itself.
 
 **Gemini quota.** A 429 is *not* transient: it means the model's free-tier budget is spent, so
-`_generate` puts that **model** into a cooldown (`GeminiClient._cooldowns`) and raises
+`_generate_gemini` puts that **model** into a cooldown (`GeminiClient._cooldowns`) and raises
 `QuotaExceeded` at once, without a second attempt and without the "retrying" notice - another
 request would only burn another unit of the same counter. The cooldown is per model on purpose:
 the vision model's requests-per-day runs out long before the text one's, and `/їжа <текст>`,
@@ -283,10 +286,11 @@ through UTC before the subtraction, because CPython ignores a shared `tzinfo` an
 count wall-clock hours across a DST switch) and capped at 24 h, which errs the safe way. The
 register is in memory only: a restart forgets it and the next 429 simply re-arms it. `check_quota` is called at the top of every attempt (a concurrent call
 may have armed the cooldown while this one slept) and, ahead of everything else, by
-`photos.on_photo` - a photo download and a Sheets read are not worth paying for just to learn the
-vision quota is gone. The user gets one of four Ukrainian messages (`i18n.quota_notice`, chosen by
-*which* model ran out and *whether* it was a per-day limit); the photo ones point at `/їжа
-<текст>`, which still works - unless the text model is unusable too, in which case
+`photos.on_photo` through `check_available` - a photo download and a Sheets read are not worth
+paying for just to learn the vision quota is gone (unless the Groq fallback is on, which can still
+answer). Unless Groq answers instead (see *Groq fallback*), the user gets one of four Ukrainian
+messages (`i18n.quota_notice`, chosen by *which* model ran out and *whether* it was a per-day
+limit); the photo ones point at `/їжа <текст>`, which still works - unless the text model is unusable too, in which case
 `_is_vision_only_outage` drops that advice: either both env vars name the same model, or the text
 model is itself out of quota or riding out a demand spike (see *Gemini overload*).
 `scheduler.run_weekly_report` needs no change: it already catches
@@ -302,7 +306,7 @@ photo they just sent. The "retrying" notice is skipped too: the whole call is ov
 seconds, and `i18n.AI_RETRYING` followed straight away by the overload reply is two messages for
 nothing (a notice already sent because of an earlier non-503 failure in the same call stays).
 Detection is `APIError.code == 503` only, never the response text: the wording and its locale are
-not a contract. When it gives up, `_generate` sets the model aside for `_OVERLOAD_COOLDOWN_S` (30 s
+not a contract. When it gives up, `_generate_gemini` sets the model aside for `_OVERLOAD_COOLDOWN_S` (30 s
 - long enough that the next photo in the same spike does not pay the retry budget again, short
 enough that a spike which clears in seconds is forgiven inside the same conversation), logs its own
 WARNING naming the cooldown - checked ahead of the per-attempt log line, so a give-up reads as one
@@ -311,12 +315,52 @@ event rather than a bare "attempt 2 failed" the reader has to join up - and rais
 `_cooldowns`: a spent quota and a busy model are different conditions with different replies, and a
 quota can be gone for the rest of the day. Like `_cooldowns` it lives in memory only - 30 s of state
 is not worth persisting across a restart. `check_overload` mirrors `check_quota` exactly: at the top
-of every attempt, and ahead of the download in `photos.on_photo`. The reply is `i18n.busy_notice`
+of every attempt, and (through `check_available`) ahead of the download in `photos.on_photo`.
+When Groq is off or has failed too, the reply is `i18n.busy_notice`
 (two messages, chosen by which model is busy), and its photo variant offers `/їжа <текст>` only when
 the text model is actually usable right now - not overloaded and not out of quota
 (`_is_vision_only_outage`, which the quota path shares for the same reason), because advice that
 cannot work is worse than none. `scheduler.run_weekly_report` again needs nothing: `ModelOverloaded`
 is an `Exception` and lands in the same numbers-only fallback.
+
+**Groq fallback.** With `GROQ_API_KEY` set, `bot.__main__` builds a `GroqClient` and passes it to
+`GeminiClient` as `fallback`; without one the bot behaves exactly as before. `_generate` is a thin
+wrapper around the Gemini ladder (`_generate_gemini`, unchanged): when that raises
+`QuotaExceeded` or `ModelOverloaded` - and only those two - the same request goes to Groq once.
+Those outages say Gemini cannot answer *right now*, not that the request is wrong, so another
+provider may well answer it; a 400/403/404, an exhausted 504 or transport ladder or an empty body
+after three attempts is either our fault or a slow backend, and propagates as before without a
+Groq call. Because `check_quota` / `check_overload` run at the top of Gemini's attempt loop, a call
+made while a model is cooling down raises on attempt 0 and goes straight to Groq without spending
+a Gemini request - which is the point of the cooldown. `GroqClient.generate` takes the very
+`contents` list Gemini would have got and translates it into one user message: a prompt string or
+a text `Part` becomes a text part, an image `Part` becomes an `image_url` part carrying a
+`data:<mime>;base64,...` URL, in the original order (a text-only call sends a plain string, which
+every chat model accepts); anything else raises and counts as a failure rather than quietly
+dropping part of the request. A system instruction becomes a leading system message. An image
+picks `GROQ_VISION_MODEL`, otherwise `GROQ_TEXT_MODEL` - decided from the contents, not from which
+Gemini model gave up, since both Gemini env vars may name the same model. A schema becomes a
+`json_schema` response format that is deliberately *non-strict*: strict mode demands every
+property be required, while our pydantic models give most fields a default so one missing number
+does not lose a meal. Reasoning models are told to keep their thinking out of `message.content`
+(`include_reasoning: false` for GPT-OSS, which rejects `reasoning_format`; `reasoning_format:
+"hidden"` for Qwen and MiniMax models, which inline a `<think>` block by default and require `parsed` or
+`hidden` in JSON mode); any other model gets neither field, and a leading `<think>...</think>` is
+stripped as a safety net. An empty answer raises. For a schema call the wrapper validates the
+answer with the schema inside the fallback attempt, so a malformed Groq answer counts as a failed
+fallback and ends in the outage reply instead of surfacing later as a generic error from
+`estimate_food`. Groq gets a single attempt (`max_retries=0` on the SDK, one 60 s deadline) and no
+cooldown register: the user has already waited for Gemini to give up, and the fallback exists to
+shorten that wait, not to add a ladder of its own. `on_retry` is never passed on for the same
+reason. The hand-over is one WARNING naming the Gemini model, the outage and the Groq model; when
+Groq fails too, a second WARNING carries its error (no traceback - a second provider being down
+during the first one's outage is just as expected) and the *original* outage is re-raised
+untouched, `__cause__` included, so `on_error` words the busy/quota reply exactly as without a
+fallback. The answer itself is silent about where it came from: the public methods parse Groq's
+text the same way as Gemini's, and no i18n string mentions Groq. The photo precheck in
+`photos.on_photo` goes through `GeminiClient.check_available`, which runs both cooldown checks only
+when no fallback is configured: with Groq available a cooling-down vision model is exactly the case
+worth downloading the photo for. The weekly report benefits without any scheduler change.
 
 **The retry notice.** The four public methods take an optional `on_retry` callback that fires
 *once* per call, just before the first backoff sleep - or before the second one, when the first
@@ -335,7 +379,8 @@ a background job and it already degrades to the numbers-only fallback.
 exceptions from `bot/ai.py` are special-cased: `QuotaExceeded` gets `i18n.quota_notice` and
 `ModelOverloaded` gets `i18n.busy_notice`, each with a WARNING-level log line naming the model and
 the cooldown instead of a traceback - a spent free-tier quota and a demand spike are expected,
-self-healing conditions, not bugs to hunt. The polling loop never dies
+self-healing conditions, not bugs to hunt. With the Groq fallback on, either one only reaches the
+handler once Groq has failed too, so the handler needs no knowledge of Groq. The polling loop never dies
 because of a handler.
 
 **Trailing columns.** `food.portion` (the portion size the model priced, shown on the `≈` line so
@@ -362,7 +407,7 @@ because aiogram handles each update in its own task.
 - **Kcal for sport is computed locally** from the MET table using the user's last known weight,
   so the AI only has to extract *what* and *how long*.
 - **Everything blocking runs off the event loop.** gspread via `asyncio.to_thread`, Gemini via
-  `client.aio`.
+  `client.aio`, Groq via `AsyncGroq`.
 - **No emojis** in bot output; plain Ukrainian text with HTML only for mentions and `<code>`.
 
 ## How to add a feature

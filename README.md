@@ -23,7 +23,7 @@ You need your own accounts and keys for everything below. Nothing is shared — 
 - [ ] 2. Telegram group + privacy mode
 - [ ] 3. Google Cloud project with the Sheets API and a service account
 - [ ] 4. Google Spreadsheet shared with the service account
-- [ ] 5. Gemini API key
+- [ ] 5. Gemini API key (and, optionally, a Groq key for the fallback)
 - [ ] 6. Local run (`.env`, Python 3.12)
 - [ ] 7. (Optional) Oracle Cloud Always Free VM for 24/7 hosting
 
@@ -102,6 +102,7 @@ Sheet layout (for reference / manual edits):
 3. Free tier as of September 2026: roughly 15 requests/min and ~1,500 requests/day on Flash / Flash‑Lite models, image input included. **Do not enable billing on that project** unless you want to pay — the free tier applies only while billing is off. When a limit is hit the bot does not retry: it sets that one model aside (for the delay the error asks for, at least 30 s, or until the daily counters reset at midnight US Pacific) and tells the chat what still works. Since only photos use the vision model, the group keeps `/їжа <текст>`, `/спорт`, corrections and the weekly report on the text model, whose budget is much larger. A `503` "high demand" answer (Google's model is busy, not your budget) works the same way after one quick retry: that model is set aside for ~30 s and the chat is told to try again in a minute.
 4. Free-tier caveat: Google may use free-tier prompts (your food photos) to improve its models, and the free tier is for non‑commercial use. Tell your group.
 5. Default models are set in `.env.example` (`GEMINI_VISION_MODEL`, `GEMINI_TEXT_MODEL`). If a model name is retired, pick a current Flash model from <https://ai.google.dev/gemini-api/docs/models>.
+6. Optional, recommended: a Groq key as a fallback. Create one at <https://console.groq.com/keys> → `GROQ_API_KEY`. With it, a request Gemini gives up on because of a spent quota or a `503` (or while that model is set aside for one) goes to Groq once, and the chat only hears about the outage when Groq fails too; the reply looks the same either way. A request that fails for any other reason never goes to Groq. The defaults are `qwen/qwen3.8-27b` for photos (`GROQ_VISION_MODEL`) and `openai/gpt-oss-120b` for text (`GROQ_TEXT_MODEL`); to change them, pick from <https://console.groq.com/docs/models> — both must support Structured Outputs, and the vision one image input. Leave `GROQ_API_KEY` empty to run on Gemini alone.
 
 ### 6. Run locally
 
@@ -248,6 +249,9 @@ Any Linux box with outbound internet works (home server, Raspberry Pi, any VPS).
 | `GEMINI_API_KEY`                           | yes      | from AI Studio                                                                                                                                    |
 | `GEMINI_VISION_MODEL`                      | no       | default in `.env.example`                                                                                                                         |
 | `GEMINI_TEXT_MODEL`                        | no       | default in `.env.example`                                                                                                                         |
+| `GROQ_API_KEY`                             | no       | from Groq Console; enables the fallback for Gemini outages (spent quota, overload), empty disables it                                             |
+| `GROQ_VISION_MODEL`                        | no       | `qwen/qwen3.8-27b` — fallback for photos; needs image input and Structured Outputs                                                                |
+| `GROQ_TEXT_MODEL`                          | no       | `openai/gpt-oss-120b` — fallback for text estimates, sport and the report; needs Structured Outputs                                               |
 | `DEFAULT_TZ`                               | no       | `Europe/Kyiv`                                                                                                                                     |
 | `WEIGH_IN_DEADLINE`                        | no       | `11:00` — reminder time                                                                                                                           |
 | `WEEKLY_REPORT_DAY` / `WEEKLY_REPORT_TIME` | no       | `mon` / `09:00` — the report covers the 7 full days before the run                                                                                |
@@ -299,7 +303,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Privacy
 
-Photos are sent to Google's Gemini API and are not stored by the bot; only Telegram's `file_id` of the photo is kept in the `food` tab so a later text correction can show the photo to Gemini again (a `file_id` is usable by this bot only). Weights and food logs live in *your* spreadsheet, visible to whoever you share it with. Keep `.env` and `secrets/` out of git (they are in `.gitignore`).
+Photos are sent to Google's Gemini API (or, with `GROQ_API_KEY` set and Gemini out, to Groq's API) and are not stored by the bot; only Telegram's `file_id` of the photo is kept in the `food` tab so a later text correction can show the photo to Gemini again (a `file_id` is usable by this bot only). Weights and food logs live in *your* spreadsheet, visible to whoever you share it with. Keep `.env` and `secrets/` out of git (they are in `.gitignore`).
 
 ## License
 

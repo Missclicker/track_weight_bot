@@ -188,7 +188,8 @@ async def test_check_overload_is_a_noop_for_a_model_that_never_failed() -> None:
 
 
 async def test_check_overload_raises_while_the_model_cools() -> None:
-    """`photos.on_photo` calls this before downloading anything."""
+    """`photos.on_photo` calls this, through `check_available`, before downloading anything
+    (without a Groq fallback)."""
     client, _ = client_with([_overload(), _overload()])
     with pytest.raises(ModelOverloaded):
         await client._generate(client.vision_model, ["look"], None)
