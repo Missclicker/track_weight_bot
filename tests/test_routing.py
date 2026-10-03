@@ -677,6 +677,27 @@ async def test_kcal_command_lists_today(harness, repo: FakeRepo, settings: Setti
     assert text.endswith("Разом: 1130 ккал (ціль 2000).")
 
 
+async def test_kcal_yesterday_lists_the_previous_day(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, session, _ = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій")
+    await repo.upsert_user(me)
+    now = user_now(me, settings)
+    await dp.feed_update(bot, _update("/калорії вчора"))
+    assert i18n.KCAL_NO_DATA_YESTERDAY in session.sent[-1]["text"]
+
+    await repo.add_food(me, FoodEstimate(dish="сьогодні", kcal=500), now, "text", 10)
+    await repo.add_food(me, FoodEstimate(dish="млинці", kcal=630), now - timedelta(days=1), "x", 11)
+    await dp.feed_update(bot, _update("/kcal вчора", message_id=2))
+    text = session.sent[-1]["text"]
+    day = (now - timedelta(days=1)).date().isoformat()
+    assert text.startswith(i18n.KCAL_HEADER_YESTERDAY.format(name="Олексій", date=day))
+    assert "630 ккал - млинці" in text
+    assert "500" not in text
+    assert text.endswith("Разом: 630 ккал.")
+
+
 async def test_corrections_report_the_day_total(harness, repo: FakeRepo, settings: Settings):
     dp, bot, session, _ = harness
     me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій", daily_kcal_target=2000)

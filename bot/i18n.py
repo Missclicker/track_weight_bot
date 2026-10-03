@@ -44,7 +44,7 @@ HELP = (
     '/їжа вчора млинці або /спорт вчора волейбол 2 години - записати за вчора (слово "вчора" '
     "працює і у відповіді на запит, і в підписі до фото)\n"
     "/today або /сьогодні - мій підсумок за сьогодні\n"
-    "/kcal або /калорії - що я з'їв сьогодні і скільки це ккал\n"
+    "/kcal або /калорії - що я з'їв сьогодні і скільки це ккал (/калорії вчора - за вчора)\n"
     "/target 2000 або /ціль 2000 - денна ціль ккал (необов'язково; /ціль стоп - прибрати)\n"
     "/profile 1981 ч 180 або /профіль ... - рік народження, стать і зріст для тижневого звіту "
     "(необов'язково; /профіль стоп - прибрати)\n"
@@ -211,6 +211,8 @@ TODAY_NO_DATA = "Сьогодні записів ще немає."
 
 KCAL_HEADER = "Їжа за сьогодні, {name} ({date}):"
 KCAL_NO_DATA = "Сьогодні їжі ще не записано."
+KCAL_HEADER_YESTERDAY = "Їжа за вчора, {name} ({date}):"
+KCAL_NO_DATA_YESTERDAY = "Вчора їжі не записано."
 KCAL_NO_TIME = "--:--"  # shown instead of the time when the row has no usable ts
 
 TARGET_USAGE = (
@@ -396,16 +398,20 @@ def kcal_today(
     date_str: str,
     items: list[tuple[str | None, str, float]],
     daily_target: float | None,
+    *,
+    yesterday: bool = False,
 ) -> str:
-    """`/kcal`: today's food entries one per line and the total. Never starts with FOOD_PREFIX.
+    """`/kcal`: the day's food entries one per line and the total. Never starts with FOOD_PREFIX.
 
-    Each item is `(at, dish, kcal)` - `reports.FoodItem` - where `at` is the "HH:MM" of the
-    entry's `ts` in the user's own timezone: when it was logged, or the meal time stated with it
-    ("/їжа 14:00 борщ"). A row without a usable timestamp shows `KCAL_NO_TIME`.
+    The day is today, or yesterday for "/калорії вчора" - only the header and the empty-day line
+    say which. Each item is `(at, dish, kcal)` - `reports.FoodItem` - where `at` is the "HH:MM" of
+    the entry's `ts` in the user's own timezone: when it was logged, or the meal time stated with
+    it ("/їжа 14:00 борщ"). A row without a usable timestamp shows `KCAL_NO_TIME`.
     """
-    lines = [KCAL_HEADER.format(name=escape(name), date=date_str)]
+    header = KCAL_HEADER_YESTERDAY if yesterday else KCAL_HEADER
+    lines = [header.format(name=escape(name), date=date_str)]
     if not items:
-        lines.append(KCAL_NO_DATA)
+        lines.append(KCAL_NO_DATA_YESTERDAY if yesterday else KCAL_NO_DATA)
         return "\n".join(lines)
     lines.extend(
         f"{at or KCAL_NO_TIME} - {kcal:.0f} ккал - {escape(dish)}" for at, dish, kcal in items

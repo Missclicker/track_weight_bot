@@ -6,6 +6,7 @@ reply, so the commands can be tapped from Telegram's command menu.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from functools import partial
 from html import escape
 from typing import Literal
@@ -196,12 +197,18 @@ async def cmd_today(message: Message, repo: SheetsRepo, settings: Settings) -> N
     )
 
 
-async def cmd_kcal(message: Message, repo: SheetsRepo, settings: Settings) -> None:
+async def cmd_kcal(
+    message: Message, command: CommandObject, repo: SheetsRepo, settings: Settings
+) -> None:
     user = await ensure_user(message, repo, settings)
-    today = user_now(user, settings).date()
-    food = await day_food(repo, user.user_id, today)
+    # "/калорії вчора" lists the previous day; any other argument is ignored, as before
+    _, yesterday = strip_yesterday(command.args)
+    day = user_now(user, settings).date() - timedelta(days=1 if yesterday else 0)
+    food = await day_food(repo, user.user_id, day)
     await message.reply(
-        i18n.kcal_today(user.name, today.isoformat(), food.items, user.daily_kcal_target)
+        i18n.kcal_today(
+            user.name, day.isoformat(), food.items, user.daily_kcal_target, yesterday=yesterday
+        )
     )
 
 

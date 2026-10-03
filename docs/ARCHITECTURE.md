@@ -52,6 +52,8 @@ Inside `guarded` the routers are tried in order:
    line starting with the time it was logged at, or the meal time stated with it ("07:54 - 390
    ккал - ..."), read straight off the row's `ts` - it is already in the user's timezone, so no conversion happens. A hand-edited row
    whose `ts` carries no usable time shows `i18n.KCAL_NO_TIME` ("--:--") instead, never midnight.
+   `/kcal вчора` (`strip_yesterday` on the argument) lists the previous day the same way under
+   its own header; any other argument is ignored.
    A bare `/food` or `/sport` (tapped from Telegram's command menu) answers with a `ForceReply`
    prompt and the reply to it is recorded - the `InputPrompt` filter recognises the prompt by its
    text prefix, so it survives a restart. Those two handlers are registered in `commands`, the
