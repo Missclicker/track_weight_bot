@@ -9,6 +9,7 @@ comments explaining why a text is worded the way it is live here, not there.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from html import escape
 
 from bot.i18n._common import FOOD_PREFIX, fmt_delta, fmt_kg
@@ -23,6 +24,11 @@ __all__ = [
     "AI_QUOTA_PHOTO_SOON",
     "AI_QUOTA_SOON",
     "AI_RETRYING",
+    "BUDGET_LEFT",
+    "BUDGET_NET",
+    "BUDGET_OVER",
+    "BUDGET_TARGET",
+    "BUDGET_TARGET_SPORT",
     "CORRECTED_MARK",
     "CORRECTION_NOT_FOUND",
     "CORRECTION_NOT_UNDERSTOOD",
@@ -40,6 +46,7 @@ __all__ = [
     "KCAL_NO_DATA",
     "KCAL_NO_DATA_YESTERDAY",
     "KCAL_NO_TIME",
+    "KCAL_SPORT_HEADER",
     "LANG_CURRENT",
     "LANG_NAME",
     "LANG_SET",
@@ -67,6 +74,8 @@ __all__ = [
     "TARGET_CURRENT",
     "TARGET_NONE",
     "TARGET_SET",
+    "TARGET_SPORT_SUFFIX",
+    "TARGET_SUFFIX",
     "TARGET_USAGE",
     "TODAY_HEADER",
     "TODAY_NO_DATA",
@@ -87,6 +96,7 @@ __all__ = [
     "WEIGHT_SAME",
     "WEIGHT_USAGE",
     "WEIGHT_WITH_DELTA",
+    "budget_line",
     "busy_notice",
     "day_total",
     "fmt_profile",
@@ -120,7 +130,8 @@ HELP = (
     '/їжа вчора млинці або /спорт вчора волейбол 2 години - записати за вчора (слово "вчора" '
     "працює і у відповіді на запит, і в підписі до фото)\n"
     "/today або /сьогодні - мій підсумок за сьогодні\n"
-    "/kcal або /калорії - що я з'їв сьогодні і скільки це ккал (/калорії вчора - за вчора)\n"
+    "/kcal або /калорії - що я з'їв і скільки спорту сьогодні, скільки лишилось до цілі "
+    "(/калорії вчора - за вчора)\n"
     "/target 2000 або /ціль 2000 - денна ціль ккал (необов'язково; /ціль стоп - прибрати)\n"
     "/profile 1981 ч 180 або /профіль ... - рік народження, стать і зріст для тижневого звіту "
     "(необов'язково; /профіль стоп - прибрати)\n"
@@ -303,6 +314,22 @@ KCAL_NO_DATA = "Сьогодні їжі ще не записано."
 KCAL_HEADER_YESTERDAY = "Їжа за вчора, {name} ({date}):"
 KCAL_NO_DATA_YESTERDAY = "Вчора їжі не записано."
 KCAL_NO_TIME = "--:--"  # shown instead of the time when the row has no usable ts
+# Heads the sport block of `/kcal`. The same words as SPORT_PREFIX, which is safe only because the
+# block never opens the message: a reply "видали" to a message *starting* with it deletes a sport
+# row, and `/kcal` always starts with its own header.
+KCAL_SPORT_HEADER = SPORT_PREFIX
+
+# The day's kcal budget is the target plus the day's sport ("goal + exercise"): sport raises what
+# may be eaten and never shrinks the food total, so the food total always equals the sum of the
+# food lines above it. `budget_line` builds the line from these; `TARGET_*SUFFIX` is the short
+# form the food replies carry.
+BUDGET_TARGET = "Ціль: {target} ккал"
+BUDGET_TARGET_SPORT = "Ціль: {target} + {sport} за спорт = {budget} ккал"
+BUDGET_LEFT = "лишилось {kcal}"
+BUDGET_OVER = "понад ціль на {kcal}"
+BUDGET_NET = "З урахуванням спорту: {kcal} ккал"
+TARGET_SUFFIX = " (ціль {target})"
+TARGET_SPORT_SUFFIX = " (ціль {target} + {sport} за спорт)"
 
 TARGET_USAGE = (
     "Денна ціль по калоріях: /ціль 2000 (від {lo} до {hi} ккал). "
@@ -366,16 +393,61 @@ def fmt_profile(
     return ", ".join(parts)
 
 
-def _target_suffix(daily_target: float | None) -> str:
-    """Suffix " (ціль 2000)" - or nothing when no (sane) target is set."""
+def _valid_target(daily_target: float | None) -> int | None:
+    """The target as it is displayed, or None when no (sane) target is set: a hand-edited cell
+    can be zero, negative or not a finite number, and none of those is a target."""
     if daily_target is None or not math.isfinite(daily_target) or daily_target <= 0:
+        return None
+    return round(daily_target)
+
+
+def _target_suffix(daily_target: float | None, sport_kcal: float = 0) -> str:
+    """Suffix " (ціль 2000)", or " (ціль 2000 + 320 за спорт)" with sport that day - or nothing
+    when no (sane) target is set."""
+    target = _valid_target(daily_target)
+    if target is None:
         return ""
-    return f" (ціль {daily_target:.0f})"
+    sport = round(sport_kcal)
+    if sport > 0:
+        return TARGET_SPORT_SUFFIX.format(target=target, sport=sport)
+    return TARGET_SUFFIX.format(target=target)
 
 
-def day_total(kcal: float, daily_target: float | None, date_str: str | None = None) -> str:
-    """Line "Разом за сьогодні: 1130 ккал (ціль 2000)." - or "за <date>" for a past day."""
-    target = _target_suffix(daily_target)
+def budget_line(food_kcal: float, sport_kcal: float, daily_target: float | None) -> str | None:
+    """The day's food against target + sport, without a trailing period; None when there is
+    nothing to say.
+
+    "Ціль: 2000 + 320 за спорт = 2320 ккал, лишилось 1280", or "Ціль: 2000 ккал, лишилось 960"
+    on a day without sport; "понад ціль на 150" once the food is over the budget. Without a target
+    only a day with both food and sport gets a line, "З урахуванням спорту: 720 ккал" - otherwise
+    the food total already is the whole story. Every figure is rounded first, as it is printed,
+    so the sum in the line always checks out.
+    """
+    food, sport, target = round(food_kcal), round(sport_kcal), _valid_target(daily_target)
+    if target is None:
+        if sport > 0 and food > 0:
+            return BUDGET_NET.format(kcal=food - sport)
+        return None
+    if sport > 0:
+        budget = target + sport
+        head = BUDGET_TARGET_SPORT.format(target=target, sport=sport, budget=budget)
+    else:
+        budget = target
+        head = BUDGET_TARGET.format(target=target)
+    rest = budget - food
+    tail = BUDGET_LEFT.format(kcal=rest) if rest >= 0 else BUDGET_OVER.format(kcal=-rest)
+    return f"{head}, {tail}"
+
+
+def day_total(
+    kcal: float, daily_target: float | None, date_str: str | None = None, sport_kcal: float = 0
+) -> str:
+    """Line "Разом за сьогодні: 1130 ккал (ціль 2000)." - or "за <date>" for a past day.
+
+    With sport logged that day the suffix credits it, "(ціль 2000 + 320 за спорт)"; how much is
+    left is for `/kcal` to say, this reply stays short.
+    """
+    target = _target_suffix(daily_target, sport_kcal)
     if date_str is None:
         return DAY_TOTAL_TODAY.format(kcal=f"{kcal:.0f}", target=target)
     return DAY_TOTAL_DATE.format(date=date_str, kcal=f"{kcal:.0f}", target=target)
@@ -475,10 +547,12 @@ def today_summary(
     lines.append(f"Їжа: {kcal_in:.0f} ккал ({food_entries} записів)")
     if alcohol_kcal:
         lines.append(f"З них алкоголь: {alcohol_kcal:.0f} ккал")
-    if sport_minutes:
-        lines.append(f"Спорт: {sport_minutes:.0f} хв, -{sport_kcal:.0f} ккал")
-    net = kcal_in - sport_kcal
-    lines.append(f"Разом: {net:.0f} ккал{_target_suffix(daily_target)}")
+    if sport_minutes or sport_kcal:
+        # no minus: sport is a credit to the day's target (see `budget_line`), not a subtraction
+        lines.append(f"Спорт: {sport_minutes:.0f} хв, {sport_kcal:.0f} ккал")
+    budget = budget_line(kcal_in, sport_kcal, daily_target)
+    if budget is not None:
+        lines.append(budget)
     if weight is not None:
         lines.append(f"Вага: {fmt_kg(weight)} кг")
     return "\n".join(lines)
@@ -489,26 +563,48 @@ def kcal_today(
     date_str: str,
     items: list[tuple[str | None, str, float]],
     daily_target: float | None,
+    sport: Sequence[tuple[str | None, str, float, float | None, float]] = (),
     *,
     yesterday: bool = False,
 ) -> str:
-    """`/kcal`: the day's food entries one per line and the total. Never starts with FOOD_PREFIX.
+    """`/kcal`: the day's food entries one per line and their total, then the day's sport and the
+    target line. Never starts with FOOD_PREFIX, nor with SPORT_PREFIX.
 
     The day is today, or yesterday for "/калорії вчора" - only the header and the empty-day line
     say which. Each item is `(at, dish, kcal)` - `reports.FoodItem` - where `at` is the "HH:MM" of
     the entry's `ts` in the user's own timezone: when it was logged, or the meal time stated with
     it ("/їжа 14:00 борщ"). A row without a usable timestamp shows `KCAL_NO_TIME`.
+
+    `sport` is that day's `(at, activity, minutes, distance_km, kcal)` - `reports.SportItem` -
+    listed under `KCAL_SPORT_HEADER` ("18:00 - біг, 5 км, 30 хв - 320 ккал"); the block is left
+    out on a day without sport. Last comes `budget_line`: the target raised by the sport, and what
+    is left of it. A day with neither food nor sport is only the header and the empty-day line.
     """
     header = KCAL_HEADER_YESTERDAY if yesterday else KCAL_HEADER
     lines = [header.format(name=escape(name), date=date_str)]
-    if not items:
+    # totals of the figures as printed, so every sum in the message checks out by hand
+    food_kcal = sum(round(kcal) for *_, kcal in items)
+    sport_kcal = sum(round(kcal) for *_, kcal in sport)
+    if items:
+        lines.extend(
+            f"{at or KCAL_NO_TIME} - {kcal:.0f} ккал - {escape(dish)}" for at, dish, kcal in items
+        )
+        lines.append(f"Разом: {food_kcal} ккал.")
+    else:
         lines.append(KCAL_NO_DATA_YESTERDAY if yesterday else KCAL_NO_DATA)
-        return "\n".join(lines)
-    lines.extend(
-        f"{at or KCAL_NO_TIME} - {kcal:.0f} ккал - {escape(dish)}" for at, dish, kcal in items
-    )
-    total = sum(kcal for _, _, kcal in items)
-    lines.append(f"Разом: {total:.0f} ккал{_target_suffix(daily_target)}.")
+        if not sport:
+            return "\n".join(lines)
+    if sport:
+        lines.append(KCAL_SPORT_HEADER)
+        for at, activity, minutes, distance_km, kcal in sport:
+            distance = f", {distance_km:g} км" if distance_km else ""
+            lines.append(
+                f"{at or KCAL_NO_TIME} - {escape(activity)}{distance}, {minutes:.0f} хв - "
+                f"{kcal:.0f} ккал"
+            )
+    budget = budget_line(food_kcal, sport_kcal, daily_target)
+    if budget is not None:
+        lines.append(budget + ".")
     return "\n".join(lines)
 
 

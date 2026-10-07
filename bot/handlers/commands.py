@@ -7,6 +7,7 @@ bot answers the sender in.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from functools import partial
 from html import escape
@@ -39,7 +40,7 @@ from bot.parsing import (
     strip_meal_time,
     strip_yesterday,
 )
-from bot.reports import day_food, today_summary
+from bot.reports import day_food, day_sport, today_summary
 from bot.scheduler import Jobs, user_now
 from bot.sheets import SheetsRepo
 
@@ -243,10 +244,17 @@ async def cmd_kcal(
     # "/калорії вчора" lists the previous day; any other argument is ignored, as before
     _, yesterday = strip_yesterday(command.args)
     day = user_now(user, settings).date() - timedelta(days=1 if yesterday else 0)
-    food = await day_food(repo, user.user_id, day)
+    food, sport = await asyncio.gather(
+        day_food(repo, user.user_id, day), day_sport(repo, user.user_id, day)
+    )
     await message.reply(
         i18n.t(lang).kcal_today(
-            user.name, day.isoformat(), food.items, user.daily_kcal_target, yesterday=yesterday
+            user.name,
+            day.isoformat(),
+            food.items,
+            user.daily_kcal_target,
+            sport.items,
+            yesterday=yesterday,
         )
     )
 

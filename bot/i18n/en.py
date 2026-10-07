@@ -11,6 +11,7 @@ the weekly block, the prefixes routing relies on - live in uk.py and apply here 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from html import escape
 
 from bot.i18n._common import FOOD_PREFIX, fmt_delta, fmt_kg
@@ -25,6 +26,11 @@ __all__ = [
     "AI_QUOTA_PHOTO_SOON",
     "AI_QUOTA_SOON",
     "AI_RETRYING",
+    "BUDGET_LEFT",
+    "BUDGET_NET",
+    "BUDGET_OVER",
+    "BUDGET_TARGET",
+    "BUDGET_TARGET_SPORT",
     "CORRECTED_MARK",
     "CORRECTION_NOT_FOUND",
     "CORRECTION_NOT_UNDERSTOOD",
@@ -42,6 +48,7 @@ __all__ = [
     "KCAL_NO_DATA",
     "KCAL_NO_DATA_YESTERDAY",
     "KCAL_NO_TIME",
+    "KCAL_SPORT_HEADER",
     "LANG_CURRENT",
     "LANG_NAME",
     "LANG_SET",
@@ -69,6 +76,8 @@ __all__ = [
     "TARGET_CURRENT",
     "TARGET_NONE",
     "TARGET_SET",
+    "TARGET_SPORT_SUFFIX",
+    "TARGET_SUFFIX",
     "TARGET_USAGE",
     "TODAY_HEADER",
     "TODAY_NO_DATA",
@@ -89,6 +98,7 @@ __all__ = [
     "WEIGHT_SAME",
     "WEIGHT_USAGE",
     "WEIGHT_WITH_DELTA",
+    "budget_line",
     "busy_notice",
     "day_total",
     "fmt_profile",
@@ -119,7 +129,8 @@ HELP = (
     '/food yesterday pancakes - log it for yesterday (the word "yesterday" also works in /sport, '
     "in a reply to my question and in a photo caption)\n"
     "/today - my summary for today\n"
-    "/kcal - what I ate today and how many kcal that is (/kcal yesterday - for yesterday)\n"
+    "/kcal - what I ate and how much sport I did today, and what is left of the target "
+    "(/kcal yesterday - for yesterday)\n"
     "/target 2000 - daily kcal target (optional; /target stop - remove it)\n"
     "/profile 1981 m 180 - birth year, sex and height for the weekly report "
     "(optional; /profile stop - remove it)\n"
@@ -293,6 +304,15 @@ KCAL_NO_DATA = "No food logged today yet."
 KCAL_HEADER_YESTERDAY = "Food yesterday, {name} ({date}):"
 KCAL_NO_DATA_YESTERDAY = "No food was logged yesterday."
 KCAL_NO_TIME = "--:--"
+KCAL_SPORT_HEADER = SPORT_PREFIX  # never the first line of `/kcal`, see uk.py
+
+BUDGET_TARGET = "Target: {target} kcal"
+BUDGET_TARGET_SPORT = "Target: {target} + {sport} for sport = {budget} kcal"
+BUDGET_LEFT = "{kcal} left"
+BUDGET_OVER = "{kcal} over target"
+BUDGET_NET = "Net of sport: {kcal} kcal"
+TARGET_SUFFIX = " (target {target})"
+TARGET_SPORT_SUFFIX = " (target {target} + {sport} for sport)"
 
 TARGET_USAGE = (
     "Daily calorie target: /target 2000 (from {lo} to {hi} kcal). "
@@ -352,20 +372,58 @@ def fmt_profile(
     return ", ".join(parts)
 
 
-def _target_suffix(daily_target: float | None) -> str:
-    """Suffix " (target 2000)" - or nothing when no (sane) target is set."""
+def _valid_target(daily_target: float | None) -> int | None:
+    """The target as it is displayed, or None when no (sane) target is set."""
     if daily_target is None or not math.isfinite(daily_target) or daily_target <= 0:
+        return None
+    return round(daily_target)
+
+
+def _target_suffix(daily_target: float | None, sport_kcal: float = 0) -> str:
+    """Suffix " (target 2000)", or " (target 2000 + 320 for sport)" with sport that day - or
+    nothing when no (sane) target is set."""
+    target = _valid_target(daily_target)
+    if target is None:
         return ""
-    return f" (target {daily_target:.0f})"
+    sport = round(sport_kcal)
+    if sport > 0:
+        return TARGET_SPORT_SUFFIX.format(target=target, sport=sport)
+    return TARGET_SUFFIX.format(target=target)
+
+
+def budget_line(food_kcal: float, sport_kcal: float, daily_target: float | None) -> str | None:
+    """The day's food against target + sport, without a trailing period, or None.
+
+    "Target: 2000 + 320 for sport = 2320 kcal, 1280 left", "Target: 2000 kcal, 960 left",
+    "... 150 over target"; without a target "Net of sport: 720 kcal" on a day with both food and
+    sport. The rules are `uk.budget_line`'s.
+    """
+    food, sport, target = round(food_kcal), round(sport_kcal), _valid_target(daily_target)
+    if target is None:
+        if sport > 0 and food > 0:
+            return BUDGET_NET.format(kcal=food - sport)
+        return None
+    if sport > 0:
+        budget = target + sport
+        head = BUDGET_TARGET_SPORT.format(target=target, sport=sport, budget=budget)
+    else:
+        budget = target
+        head = BUDGET_TARGET.format(target=target)
+    rest = budget - food
+    tail = BUDGET_LEFT.format(kcal=rest) if rest >= 0 else BUDGET_OVER.format(kcal=-rest)
+    return f"{head}, {tail}"
 
 
 def _plural(count: int, one: str, many: str) -> str:
     return f"{count} {one if count == 1 else many}"
 
 
-def day_total(kcal: float, daily_target: float | None, date_str: str | None = None) -> str:
-    """Line "Total for today: 1130 kcal (target 2000)." - or "for <date>" for a past day."""
-    target = _target_suffix(daily_target)
+def day_total(
+    kcal: float, daily_target: float | None, date_str: str | None = None, sport_kcal: float = 0
+) -> str:
+    """Line "Total for today: 1130 kcal (target 2000)." - or "for <date>" for a past day; with
+    sport that day the suffix is "(target 2000 + 320 for sport)"."""
+    target = _target_suffix(daily_target, sport_kcal)
     if date_str is None:
         return DAY_TOTAL_TODAY.format(kcal=f"{kcal:.0f}", target=target)
     return DAY_TOTAL_DATE.format(date=date_str, kcal=f"{kcal:.0f}", target=target)
@@ -456,10 +514,11 @@ def today_summary(
     lines.append(f"Food: {kcal_in:.0f} kcal ({_plural(food_entries, 'entry', 'entries')})")
     if alcohol_kcal:
         lines.append(f"Including alcohol: {alcohol_kcal:.0f} kcal")
-    if sport_minutes:
-        lines.append(f"Sport: {sport_minutes:.0f} min, -{sport_kcal:.0f} kcal")
-    net = kcal_in - sport_kcal
-    lines.append(f"Total: {net:.0f} kcal{_target_suffix(daily_target)}")
+    if sport_minutes or sport_kcal:
+        lines.append(f"Sport: {sport_minutes:.0f} min, {sport_kcal:.0f} kcal")
+    budget = budget_line(kcal_in, sport_kcal, daily_target)
+    if budget is not None:
+        lines.append(budget)
     if weight is not None:
         lines.append(f"Weight: {fmt_kg(weight)} kg")
     return "\n".join(lines)
@@ -470,23 +529,41 @@ def kcal_today(
     date_str: str,
     items: list[tuple[str | None, str, float]],
     daily_target: float | None,
+    sport: Sequence[tuple[str | None, str, float, float | None, float]] = (),
     *,
     yesterday: bool = False,
 ) -> str:
-    """`/kcal`: the day's food entries one per line and the total. Never starts with FOOD_PREFIX.
+    """`/kcal`: the day's food entries and their total, the day's sport and the target line.
+    Never starts with FOOD_PREFIX, nor with SPORT_PREFIX.
 
-    Items are `(at, dish, kcal)` as in `uk.kcal_today`.
+    Items are `(at, dish, kcal)` and sport `(at, activity, minutes, distance_km, kcal)` as in
+    `uk.kcal_today`.
     """
     header = KCAL_HEADER_YESTERDAY if yesterday else KCAL_HEADER
     lines = [header.format(name=escape(name), date=date_str)]
-    if not items:
+    # totals of the figures as printed, so every sum in the message checks out by hand
+    food_kcal = sum(round(kcal) for *_, kcal in items)
+    sport_kcal = sum(round(kcal) for *_, kcal in sport)
+    if items:
+        lines.extend(
+            f"{at or KCAL_NO_TIME} - {kcal:.0f} kcal - {escape(dish)}" for at, dish, kcal in items
+        )
+        lines.append(f"Total: {food_kcal} kcal.")
+    else:
         lines.append(KCAL_NO_DATA_YESTERDAY if yesterday else KCAL_NO_DATA)
-        return "\n".join(lines)
-    lines.extend(
-        f"{at or KCAL_NO_TIME} - {kcal:.0f} kcal - {escape(dish)}" for at, dish, kcal in items
-    )
-    total = sum(kcal for _, _, kcal in items)
-    lines.append(f"Total: {total:.0f} kcal{_target_suffix(daily_target)}.")
+        if not sport:
+            return "\n".join(lines)
+    if sport:
+        lines.append(KCAL_SPORT_HEADER)
+        for at, activity, minutes, distance_km, kcal in sport:
+            distance = f", {distance_km:g} km" if distance_km else ""
+            lines.append(
+                f"{at or KCAL_NO_TIME} - {escape(activity)}{distance}, {minutes:.0f} min - "
+                f"{kcal:.0f} kcal"
+            )
+    budget = budget_line(food_kcal, sport_kcal, daily_target)
+    if budget is not None:
+        lines.append(budget + ".")
     return "\n".join(lines)
 
 

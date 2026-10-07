@@ -8,6 +8,7 @@ row is re-estimated.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from functools import partial
 from typing import Literal
@@ -23,7 +24,7 @@ from bot.handlers import ensure_user
 from bot.handlers.weight import weigh_in
 from bot.i18n import Lang
 from bot.parsing import is_food_cancel_request, parse_correction
-from bot.reports import day_food
+from bot.reports import day_food, day_sport
 from bot.scheduler import user_now
 from bot.sheets import SheetsRepo, User
 
@@ -80,13 +81,18 @@ async def _day_total_line(
     lang: Lang,
     kcal_delta: float = 0,
 ) -> str:
-    """Total for the day the corrected entry belongs to. `kcal_delta` accounts for an update
-    that is written only after the reply is sent."""
+    """Total for the day the corrected entry belongs to, with that day's sport credited to the
+    target. `kcal_delta` accounts for an update that is written only after the reply is sent."""
     today = user_now(user, settings).date()
     day = date.fromisoformat(entry_date) if entry_date else today
-    total = (await day_food(repo, user.user_id, day)).total_kcal + kcal_delta
+    food, sport = await asyncio.gather(
+        day_food(repo, user.user_id, day), day_sport(repo, user.user_id, day)
+    )
     return i18n.t(lang).day_total(
-        total, user.daily_kcal_target, None if day == today else day.isoformat()
+        food.total_kcal + kcal_delta,
+        user.daily_kcal_target,
+        None if day == today else day.isoformat(),
+        sport.total_kcal,
     )
 
 
