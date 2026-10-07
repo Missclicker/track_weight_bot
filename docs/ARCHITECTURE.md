@@ -118,7 +118,11 @@ Inside `guarded` the routers are tried in order:
    regret phrases (`is_food_cancel_request` - no reply, no Gemini call, the row untouched) and a
    reply `weight.weigh_in` claims, which `weight` (tried before this router) has already taken.
    All three are scoped to the sender, so only the author of an activity can correct or delete
-   it.
+   it. A refused number or delete word is answered with "not found", but refused *text* is
+   dropped silently: under somebody else's workout it is far more often "молодець!" than an
+   attempted correction. `revise_sport` tells the model to drop the earlier minutes when the
+   correction changes only the distance - they may have been derived from it
+   (`met.default_minutes`), and kept they would halve the kcal of "it was 10 km".
 
 Recording sport has no router of its own: free text is never scanned for sport keywords (too many
 false positives in a chatty group), so `sport.record_sport` is reached only from `/sport` and its
@@ -449,11 +453,12 @@ text the same way as Gemini's, and no i18n string mentions Groq. The photo prech
 when no fallback is configured: with Groq available a cooling-down vision model is exactly the case
 worth downloading the photo for. The weekly report benefits without any scheduler change.
 
-**The retry notice.** The four public methods take an optional `on_retry` callback that fires
+**The retry notice.** The five public methods take an optional `on_retry` callback that fires
 *once* per call, just before the first backoff sleep - or before the second one, when the first
 failure was a 503 and the overload path suppressed it. The interactive call sites
 (`photos.on_photo`,
-`commands._record_food_text`, `corrections.on_text_correction`, `sport.record_sport`) pass
+`commands._record_food_text`, `corrections.on_text_correction`, `sport.record_sport`,
+`sport.on_text_correction`) pass
 `partial(message.reply, i18n.t(lang).AI_RETRYING)`, so somebody waiting on a slow estimate is told the
 answer is late instead of staring at silence; the notice is left in the chat. Its wording names no
 cause, because the same notice covers a deadline, a 5xx and a dropped connection. A send that fails

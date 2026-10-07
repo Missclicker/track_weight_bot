@@ -381,7 +381,9 @@ SPORT_PROMPT = (
 # The earlier record carries the activity as it was shown (its display name, Ukrainian or English,
 # whichever the person read), so the model is asked to map it back to a key. kcal is left out of
 # it: it is recomputed from the MET table, and a stale number would only invite the model to
-# reason about calories it is not asked for.
+# reason about calories it is not asked for. The stored minutes may themselves be derived
+# from the distance (`met.default_minutes`), so a new distance without a stated duration must
+# drop them - kept, "it was 10 km" under a 5 km run would count half the work.
 REVISE_SPORT_PROMPT = (
     "You extract sport activities for a friend group tracking calories. "
     "An earlier record of an activity is given below as JSON (the activity by its display name), "
@@ -391,7 +393,9 @@ REVISE_SPORT_PROMPT = (
     "Return JSON: activity (one of: {keys} - the key of the earlier activity unless the "
     "correction changes it; 'none' only if the correction makes clear it was no sport at all), "
     "minutes (duration, kept from the earlier record unless the correction changes it; null if "
-    "unknown), distance_km (kept from the earlier record unless the correction changes it; null "
+    "unknown, and null when the correction changes the distance without stating a duration, "
+    "because the earlier minutes may have been derived from that distance), "
+    "distance_km (kept from the earlier record unless the correction changes it; null "
     "if unknown). Convert hours to minutes and metres to km. Steps: 1000 steps is about 0.7 km "
     "walking.\n"
     "Earlier record:\n{previous}\n"

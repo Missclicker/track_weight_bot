@@ -329,9 +329,9 @@ async def test_a_bare_number_replying_to_a_sport_confirmation_corrects_its_kcal(
     assert ai.sport_revise_calls == []  # a number never goes to Gemini
 
 
-@pytest.mark.parametrize("text", ["84.3", "84 кг", "вага 84"])
+@pytest.mark.parametrize(("text", "kg"), [("84.3", 84.3), ("84 кг", 84.0), ("вага 84", 84.0)])
 async def test_a_marked_weight_replying_to_a_sport_confirmation_is_a_weigh_in(
-    harness, repo: FakeRepo, text: str
+    harness, repo: FakeRepo, text: str, kg: float
 ) -> None:
     dp, bot, session, ai = harness
     await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
@@ -340,7 +340,7 @@ async def test_a_marked_weight_replying_to_a_sport_confirmation_is_a_weigh_in(
 
     await dp.feed_update(bot, _update(text, reply_to=sport_msg, message_id=2))
     row = repo.rows["weight"][0]
-    assert row["source"] == "reply" and row["kg"] in (84.3, 84.0)
+    assert row["source"] == "reply" and row["kg"] == kg
     assert repo.rows["sport"] == [before]  # the activity is untouched
     assert ai.sport_revise_calls == []
 
@@ -1239,8 +1239,10 @@ async def test_only_the_owner_can_correct_an_activity(harness, repo: FakeRepo, u
 
     await dp.feed_update(bot, _update("350", reply_to=sport_msg))
     assert session.sent[-1]["text"] == i18n.uk.CORRECTION_NOT_FOUND
+    sent = len(session.sent)
+    # text under somebody else's workout is chat ("молодець!"), so it gets no answer at all
     await dp.feed_update(bot, _update("це було 45 хв", reply_to=sport_msg, message_id=2))
-    assert session.sent[-1]["text"] == i18n.uk.CORRECTION_NOT_FOUND
+    assert len(session.sent) == sent
     assert ai.sport_revise_calls == []  # refused before Gemini
     assert repo.rows["sport"] == [before]
 

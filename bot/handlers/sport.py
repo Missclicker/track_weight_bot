@@ -172,7 +172,8 @@ async def on_text_correction(
     original_id = message.reply_to_message.message_id
     entry = await repo.get_sport_entry(message.from_user.id, original_id)
     if entry is None:
-        await message.reply(strings.CORRECTION_NOT_FOUND)
+        # Silent, unlike the food path: text under somebody else's workout is far more often
+        # "молодець!" than an attempted correction, and a "not found" answer to it is noise.
         return
     user = await ensure_user(message, repo, settings)
     now = user_now(user, settings)
