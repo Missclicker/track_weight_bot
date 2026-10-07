@@ -355,6 +355,23 @@ def test_kcal_today_sport_line_without_distance_or_time() -> None:
     assert text.splitlines()[-1] == f"{uk.KCAL_NO_TIME} - зал, 60 хв - 250 ккал"
 
 
+@pytest.mark.parametrize("module", [uk, en], ids=["uk", "en"])
+def test_kcal_today_totals_are_sums_of_the_printed_lines(module: ModuleType) -> None:
+    # 160.4 + 160.4 = 320.8 would print as 321 under two lines reading 160
+    food = [("08:00", "a", 100.4), ("09:00", "b", 100.4)]
+    sport = [("18:00", "x", 30.0, None, 160.4), ("19:00", "y", 30.0, None, 160.4)]
+    lines = module.kcal_today("A", "d", food, 2000, sport).splitlines()
+    assert "200" in lines[3]
+    assert "2000 + 320" in lines[-1] and "2320" in lines[-1] and "2120" in lines[-1]
+
+
+@pytest.mark.parametrize("module", [uk, en], ids=["uk", "en"])
+def test_today_summary_shows_the_sport_it_credits(module: ModuleType) -> None:
+    # a hand-edited sport row with a blank minutes cell still raises the target, so it is shown
+    lines = module.today_summary("A", "d", 1000, 0, 300, 0, None, 1, 2000).splitlines()
+    assert "300" in lines[2] and "+ 300" in lines[3]
+
+
 def test_kcal_today_variants() -> None:
     food = [("08:00", "x", 1040.0)]
     sport = [("18:00", "біг", 30.0, None, 320.0)]

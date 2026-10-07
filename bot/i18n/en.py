@@ -127,7 +127,8 @@ HELP = (
     '/food yesterday pancakes - log it for yesterday (the word "yesterday" also works in /sport, '
     "in a reply to my question and in a photo caption)\n"
     "/today - my summary for today\n"
-    "/kcal - what I ate today and how many kcal that is (/kcal yesterday - for yesterday)\n"
+    "/kcal - what I ate and how much sport I did today, and what is left of the target "
+    "(/kcal yesterday - for yesterday)\n"
     "/target 2000 - daily kcal target (optional; /target stop - remove it)\n"
     "/profile 1981 m 180 - birth year, sex and height for the weekly report "
     "(optional; /profile stop - remove it)\n"
@@ -495,7 +496,7 @@ def today_summary(
     lines.append(f"Food: {kcal_in:.0f} kcal ({_plural(food_entries, 'entry', 'entries')})")
     if alcohol_kcal:
         lines.append(f"Including alcohol: {alcohol_kcal:.0f} kcal")
-    if sport_minutes:
+    if sport_minutes or sport_kcal:
         lines.append(f"Sport: {sport_minutes:.0f} min, {sport_kcal:.0f} kcal")
     budget = budget_line(kcal_in, sport_kcal, daily_target)
     if budget is not None:
@@ -522,11 +523,14 @@ def kcal_today(
     """
     header = KCAL_HEADER_YESTERDAY if yesterday else KCAL_HEADER
     lines = [header.format(name=escape(name), date=date_str)]
+    # totals of the figures as printed, so every sum in the message checks out by hand
+    food_kcal = sum(round(kcal) for *_, kcal in items)
+    sport_kcal = sum(round(kcal) for *_, kcal in sport)
     if items:
         lines.extend(
             f"{at or KCAL_NO_TIME} - {kcal:.0f} kcal - {escape(dish)}" for at, dish, kcal in items
         )
-        lines.append(f"Total: {sum(kcal for *_, kcal in items):.0f} kcal.")
+        lines.append(f"Total: {food_kcal} kcal.")
     else:
         lines.append(KCAL_NO_DATA_YESTERDAY if yesterday else KCAL_NO_DATA)
         if not sport:
@@ -539,9 +543,7 @@ def kcal_today(
                 f"{at or KCAL_NO_TIME} - {escape(activity)}{distance}, {minutes:.0f} min - "
                 f"{kcal:.0f} kcal"
             )
-    budget = budget_line(
-        sum(kcal for *_, kcal in items), sum(kcal for *_, kcal in sport), daily_target
-    )
+    budget = budget_line(food_kcal, sport_kcal, daily_target)
     if budget is not None:
         lines.append(budget + ".")
     return "\n".join(lines)
