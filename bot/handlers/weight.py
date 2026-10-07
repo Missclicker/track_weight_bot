@@ -37,11 +37,13 @@ def weigh_in(message: Message, bot: Bot, settings: Settings) -> tuple[float, str
     counts - "ping" for the morning ping, "reply" for everything else, "text" for a number that
     replies to nothing. A reply to another *person* is conversation, never a measurement.
 
-    The one bot message that takes a stricter number is the `≈` food estimate, where a bare
-    integer in the weight range is far more likely a kcal correction of the portion: there the
-    number has to carry a decimal, a unit or a label (`parse_weight(require_marker=True)`).
-    `corrections.CorrectionReply` asks this same function, so the two filters stay mutually
-    exclusive and the router order decides only which one is tried first.
+    The two bot messages that take a stricter number are the `≈` food estimate and the sport
+    confirmation (`SPORT_PREFIXES`, any language): under either a bare integer in the weight range
+    is far more likely a kcal correction of that entry, so there the number has to carry a
+    decimal, a unit or a label (`parse_weight(require_marker=True)`) - "84.3", "84 кг" and
+    "вага 84" still weigh in. `corrections.CorrectionReply` and `sport.SportReply` ask this same
+    function, so the filters stay mutually exclusive and the router order decides only which
+    one is tried first.
     """
     if message.from_user is None:
         return None
@@ -52,7 +54,8 @@ def weigh_in(message: Message, bot: Bot, settings: Settings) -> tuple[float, str
         message.text,
         settings.weight_min,
         settings.weight_max,
-        require_marker=replied is not None and replied.startswith(i18n.FOOD_PREFIX),
+        require_marker=replied is not None
+        and replied.startswith((i18n.FOOD_PREFIX, *i18n.SPORT_PREFIXES)),
     )
     if kg is None:
         return None

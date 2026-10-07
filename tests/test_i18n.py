@@ -100,6 +100,16 @@ def test_recognition_tuples_cover_both_languages() -> None:
 
 
 @pytest.mark.parametrize("module", [uk, en], ids=["uk", "en"])
+def test_every_sport_confirmation_ends_with_how_to_correct_it(module: ModuleType) -> None:
+    plain = module.sport_saved("x", 30, 5, 300).splitlines()
+    dated = module.sport_saved("x", 30, None, 300, "2026-09-18").splitlines()
+    corrected = module.sport_saved("x", 30, None, 300, "2026-09-18", corrected=True).splitlines()
+    hint = plain[-1]
+    assert len(plain) == 2 and dated[-1] == hint
+    assert corrected == [dated[0], module.CORRECTED_MARK, hint]
+
+
+@pytest.mark.parametrize("module", [uk, en], ids=["uk", "en"])
 def test_messages_start_with_their_prefix(module: ModuleType) -> None:
     assert module.SPORT_SAVED.startswith(module.SPORT_PREFIX)
     assert module.SPORT_SAVED_DATE.startswith(module.SPORT_PREFIX)
@@ -108,6 +118,7 @@ def test_messages_start_with_their_prefix(module: ModuleType) -> None:
     assert module.SPORT_INPUT_PROMPT.startswith(module.SPORT_INPUT_PROMPT_PREFIX)
     assert module.sport_saved("x", 30, 5, 300).startswith(module.SPORT_PREFIX)
     assert module.sport_saved("x", 30, None, 300, "2026-09-18").startswith(module.SPORT_PREFIX)
+    assert module.sport_saved("x", 30, 5, 300, corrected=True).startswith(module.SPORT_PREFIX)
     assert module.food_estimate("x", 500, 0, 1, 1, 1, 0.5, "", "").startswith(i18n.FOOD_PREFIX)
     # `/kcal` must never pass for a food estimate, even for somebody whose name starts with it
     items = [("08:00", "≈ x", 100.0)]
@@ -217,6 +228,7 @@ def _rendered(module: ModuleType) -> list[str]:
         module.food_estimate("pizza", 900, 100, 30, 40, 90, 0.1, "note", "400 g", True, "Total"),
         module.sport_saved("running", 30, 5, 390),
         module.sport_saved("running", 30, None, 390, "2026-09-18"),
+        module.sport_saved("running", 45, 5, 585, "2026-09-18", corrected=True),
         module.today_summary("Alex", "2026-09-18", 2000, 100, 300, 30, 84.2, 1, 2000),
         module.today_summary("Alex", "2026-09-18", 0, 0, 0, 0, None, 0, None),
         module.kcal_today("Alex", "2026-09-18", [("08:00", "toast", 300), (None, "tea", 20)], 2000),

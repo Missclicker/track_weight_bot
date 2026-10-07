@@ -107,3 +107,30 @@ async def test_the_sport_title_is_ukrainian_by_default() -> None:
     entry = await client.parse_sport("біг 30 хв", 80)
     assert entry is not None
     assert entry.title == met.ACTIVITIES["running"].title
+
+
+_EARLIER_SPORT = {"activity": "біг", "minutes": 30.0, "distance_km": 5.0, "kcal": 390.0}
+
+
+@pytest.mark.parametrize("lang", ["en", "uk"])
+async def test_a_revised_activity_is_titled_in_the_readers_language_and_costed_by_met(
+    lang: str,
+) -> None:
+    answer = {"activity": "walking", "minutes": 60, "distance_km": None}
+    client, models = client_with([json.dumps(answer)])
+    entry = await client.revise_sport(_EARLIER_SPORT, "не біг, а ходьба годину", 70, lang=lang)
+    assert entry is not None
+    assert entry.title == met.activity_title("walking", lang)
+    # the model's kcal is never asked for: the MET table prices the corrected activity
+    assert (entry.activity, entry.minutes, entry.distance_km) == ("walking", 60, None)
+    assert entry.kcal == met.estimate_kcal("walking", 60, 70)[1]
+    prompt = models.contents[0][0]
+    assert models.models == ["text-model"]
+    assert '"activity": "біг"' in prompt and "kcal" not in prompt.split("Earlier record:")[1]
+    assert "<<<\nне біг, а ходьба годину\n>>>" in prompt
+
+
+@pytest.mark.parametrize("answer", [{"activity": "none"}, {"activity": "teleportation"}])
+async def test_a_revision_naming_no_known_activity_is_none(answer: dict[str, object]) -> None:
+    client, _ = client_with([json.dumps(answer)])
+    assert await client.revise_sport(_EARLIER_SPORT, "це був не спорт", 70) is None

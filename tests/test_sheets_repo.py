@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from gspread.exceptions import APIError
 
-from bot.ai import FoodEstimate
+from bot.ai import FoodEstimate, SportEntry
 from bot.config import Settings
 from bot.parsing import parse_profile, parse_water_schedule
 from bot.sheets import HEADERS, SheetsRepo, User, WaterSubscription, explain_startup_error
@@ -310,7 +310,7 @@ async def test_delete_abandons_a_row_that_moved_since_the_find(
     assert names == ["U1", "U3"]  # nothing was removed, U3 in particular survived
 
     # the same guard when the stale row number now points past the end of the tab
-    monkeypatch.setattr(repo, "_find_sport_row_sync", lambda *args: 99)
+    monkeypatch.setattr(repo, "_find_sport_row_sync", lambda *args: (99, {}))
     assert await repo.delete_sport_entry(1, 42) is False
 
 
@@ -326,6 +326,52 @@ async def test_delete_sport_entry_is_scoped_to_owner(repo: SheetsRepo):
     rows = ws(repo, "sport").rows
     assert len(rows) == 2 and rows[1][HEADERS["sport"].index("name")] == "Bob"
     assert await repo.delete_sport_entry(1, 77) is False
+
+
+async def test_get_and_update_sport_entry_are_scoped_to_owner(repo: SheetsRepo):
+    now = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+    alice = User(user_id=1, chat_id=-100, name="Alice")
+    bob = User(user_id=2, chat_id=-200, name="Bob")
+    await repo.add_sport(bob, "біг", 30, 5, 390, now, "command", message_id=77)
+    await repo.add_sport(
+        alice, "зал", 60, None, 400, now, "prompt", message_id=77, day=date(2026, 9, 7)
+    )
+
+    entry = await repo.get_sport_entry(1, 77)
+    assert entry == {
+        "activity": "зал",
+        "minutes": 60.0,
+        "distance_km": None,  # blank, not 0
+        "kcal": 400.0,
+        "date": "2026-09-07",
+        "source": "prompt",
+    }
+    assert await repo.get_sport_entry(3, 77) is None  # nobody's
+
+    assert await repo.update_sport_kcal(3, 77, 999) is False
+    assert await repo.update_sport_kcal(1, 77, 450) is True
+    assert (await repo.get_sport_entry(1, 77) or {})["kcal"] == 450.0
+    assert (await repo.get_sport_entry(2, 77) or {})["kcal"] == 390.0  # Bob's row untouched
+
+    revised = SportEntry(activity="running", title="біг", minutes=45, distance_km=7.5, kcal=600)
+    assert await repo.update_sport_entry(3, 77, revised, new_message_id=78) is False
+    assert await repo.update_sport_entry(1, 77, revised, new_message_id=78) is True
+    assert await repo.get_sport_entry(1, 77) is None  # re-keyed ...
+    after = await repo.get_sport_entry(1, 78)
+    assert after is not None
+    assert (after["activity"], after["minutes"], after["distance_km"], after["kcal"]) == (
+        "біг",
+        45.0,
+        7.5,
+        600.0,
+    )
+    # ... while the day it counts towards, when it was logged and how stay as they were
+    row = ws(repo, "sport").rows[2]
+    cols = HEADERS["sport"]
+    assert row[cols.index("date")] == "2026-09-07"
+    assert row[cols.index("ts")] == "2026-09-08T12:00:00+00:00"
+    assert row[cols.index("source")] == "prompt"
+    assert ws(repo, "sport").rows[1][cols.index("message_id")] == "77"  # Bob still keyed to 77
 
 
 async def test_set_daily_kcal_target_writes_only_that_cell(repo: SheetsRepo) -> None:

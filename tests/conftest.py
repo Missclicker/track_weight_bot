@@ -18,11 +18,11 @@ from google.genai import errors as genai_errors
 from groq.resources.chat.completions import AsyncCompletions
 
 from bot import ai
-from bot.ai import FoodEstimate
+from bot.ai import FoodEstimate, SportEntry
 from bot.config import Settings
 from bot.fallback import GroqClient
 from bot.i18n import DEFAULT_LANG, Lang
-from bot.sheets import HEADERS, User, WaterSubscription, _parse_ts, num
+from bot.sheets import HEADERS, User, WaterSubscription, _parse_ts, _sport_entry, num
 
 
 class FakeRepo:
@@ -235,15 +235,45 @@ class FakeRepo:
         self.rows["food"].remove(row)
         return dict(row)
 
-    async def delete_sport_entry(self, user_id: int, message_id: int) -> bool:
-        row = next(
+    def _sport_row(self, user_id: int, message_id: int) -> dict[str, Any] | None:
+        return next(
             (
-                r
-                for r in self.rows["sport"]
-                if r["message_id"] == message_id and r["user_id"] == user_id
+                row
+                for row in self.rows["sport"]
+                if row["message_id"] == message_id and row["user_id"] == user_id
             ),
             None,
         )
+
+    async def get_sport_entry(self, user_id: int, message_id: int) -> dict[str, Any] | None:
+        # the real repo's own conversion, so a handler sees the same floats / None either way
+        row = self._sport_row(user_id, message_id)
+        return _sport_entry(row) if row is not None else None
+
+    async def update_sport_kcal(self, user_id: int, message_id: int, kcal: float) -> bool:
+        row = self._sport_row(user_id, message_id)
+        if row is None:
+            return False
+        row["kcal"] = kcal
+        return True
+
+    async def update_sport_entry(
+        self, user_id: int, message_id: int, entry: SportEntry, new_message_id: int
+    ) -> bool:
+        row = self._sport_row(user_id, message_id)
+        if row is None:
+            return False
+        row.update(
+            activity=entry.title,
+            minutes=entry.minutes,
+            distance_km=entry.distance_km if entry.distance_km is not None else "",
+            kcal=entry.kcal,
+            message_id=new_message_id,
+        )
+        return True
+
+    async def delete_sport_entry(self, user_id: int, message_id: int) -> bool:
+        row = self._sport_row(user_id, message_id)
         if row is None:
             return False
         self.rows["sport"].remove(row)

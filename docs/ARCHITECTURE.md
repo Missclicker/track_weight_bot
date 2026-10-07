@@ -24,7 +24,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/parsing.py` | Pure functions: `parse_weight` (with `require_marker`, which demands the number carry a decimal, a "кг"/"kg" unit or a "вага"/"weight" label - the same regex groups, named, so the flag cannot drift from the pattern), `parse_correction`, `parse_kcal_target`, `parse_profile` (birth year or age, sex and height in any order, all-or-nothing, + the `ProfileUpdate` value object) / `parse_sex` (a typed word or a `users.sex` cell -> `"m"`/`"f"`), `is_delete_request` / `is_food_cancel_request` (the narrow and the wide cancel vocabulary), `strip_yesterday` (cuts the whole-word "вчора" out of a message and says it was there), `strip_meal_time` (takes a leading or trailing `H:MM` / `H-MM` off a `/їжа` text as the meal time), `ts_time` (the "HH:MM" of a stored `ts`), `parse_water_schedule` / `is_water_due` (+ the `WaterSchedule` value object). Every vocabulary is Ukrainian and English at once, whatever the sender's language (see *Languages*). |
 | `bot/met.py` | MET table (activity -> MET, keyword regexes, typical pace, Ukrainian and English display name) and `kcal = MET * kg * h`; `activity_title(key, lang)` names an activity for a reader. |
 | `bot/nutrition.py` | Pure numbers for the weekly report, None in -> None out: `age_on`, the age-based `protein_g_per_kg` and the `reference_weight` it multiplies, `bmi`, `bmr_mifflin` (Mifflin-St Jeor), `maintenance_kcal` (sedentary BMR + logged sport) and `energy_shares` (see *Nutrition numbers* below). |
-| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `weekly_report` - each takes a keyword-only `lang` for the language the model writes in (the only call with a role: `REPORT_SYSTEM_INSTRUCTIONS[lang]` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). `_generate` wraps the Gemini ladder (`_generate_gemini`) and, when a `GroqClient` was passed in as `fallback`, hands the call to Groq on either outage; `check_available` is the photo precheck that knows about it (see *Groq fallback*). |
+| `bot/ai.py` | `GeminiClient`: `estimate_food` (photo or text), `revise_food` (text only), `parse_sport`, `revise_sport` (text only; the same MET post-processing as `parse_sport`), `weekly_report` - each takes a keyword-only `lang` for the language the model writes in (the only call with a role: `REPORT_SYSTEM_INSTRUCTIONS[lang]` goes out as the config's `system_instruction`, and a non-blank `previous_report` is appended after the data as a delimited "PREVIOUS REPORT" block - see *Weekly report* below). Pydantic response schemas with clamping validators; three attempts with escalating server deadlines and an optional one-shot "retrying" callback (see *Gemini retries* below); a per-model quota cooldown with `check_quota` / `QuotaExceeded` and the pure `quota_cooldown` parser (see *Gemini quota*); a separate per-model overload cooldown with `check_overload` / `ModelOverloaded`, which cuts the ladder short on a 503 (see *Gemini overload*). `_generate` wraps the Gemini ladder (`_generate_gemini`) and, when a `GroqClient` was passed in as `fallback`, hands the call to Groq on either outage; `check_available` is the photo precheck that knows about it (see *Groq fallback*). |
 | `bot/fallback.py` | `GroqClient`: one Groq chat completion for a Gemini-shaped call - prompt strings and image `Part`s translated into chat content parts, the vision or text model picked by whether an image is present, a strict `json_schema` response format built from a pydantic schema by `strict_schema` plus a completeness check on the answer, an output cap on every request, reasoning kept out of the answer. Single attempt, no cooldowns (see *Groq fallback*). Not named `groq.py`, which would shadow the SDK. |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions; `set_lang` / `get_lang` for the person's language. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
@@ -76,7 +76,7 @@ Inside `guarded` the routers are tried in order:
    хліб", "не записуй хліб" and "remove the bread" - drop an ingredient from the estimate - stay
    corrections of the dish, "помилкова порція" is not "помилка", and "remove one" is one piece
    fewer, not a delete ("one" is no filler word; "delete this one" is a whole phrase). The regret
-   half is deliberately food-only (`sport.SportDeleteReply`, `commands.PromptCancel` and
+   half is deliberately food-only (`sport.SportReply`, `commands.PromptCancel` and
    `commands.InputPrompt` keep asking `is_delete_request`): a wrong photo is the thing people
    regret out loud, and widening the vocabulary everywhere would start eating ordinary replies.
    A reply that `weight.weigh_in` claims as a weigh-in is refused by all three kinds, which is what
@@ -94,20 +94,31 @@ Inside `guarded` the routers are tried in order:
    whatever is on screen. Our messages are told apart by their text prefix, never by a remembered
    message id, so the whole thing survives a restart - and the prefix of every language counts
    (`i18n.PING_PREFIXES`), since a ping sent in one language is answered by people reading another. A reply to another *person* is conversation
-   and is ignored. The one stricter case is a reply to the `≈` food estimate, where
-   `parse_weight(require_marker=True)` demands a decimal, a "кг"/"kg" unit or a "вага"/"weight"
-   label: 40..200 overlaps perfectly plausible kcal corrections of a portion, so a bare "84" under
-   an estimate stays a correction and only "84.3" / "84 кг" / "вага 84" is a weigh-in. Replies to
+   and is ignored. The two stricter cases are a reply to the `≈` food estimate and one to a sport
+   confirmation (`i18n.SPORT_PREFIXES`), where `parse_weight(require_marker=True)` demands a
+   decimal, a "кг"/"kg" unit or a "вага"/"weight" label: 40..200 overlaps perfectly plausible kcal
+   corrections of a portion or a workout, so a bare "84" under either stays a correction and only
+   "84.3" / "84 кг" / "вага 84" is a weigh-in. Replies to
    the `/їжа` and `/спорт` prompts never reach here - `commands` is the first router inside
    `guarded` and records them as food or sport.
 5. `photos` - any photo -> Gemini vision -> reply -> `add_food` with the *reply's* `message_id`
    so a later correction can find the row.
-6. `sport` - a delete word (`parsing.is_delete_request`, the narrow vocabulary - the regret phrases
-   delete food rows only) in reply to a bot message starting with `Спорт:` or `Sport:`
-   (`i18n.SPORT_PREFIXES`) -> `delete_sport_entry`.
-   That is the whole router: any other reply to a sport confirmation is ignored, re-estimating an
-   activity is not a thing the bot does - except a number, which `weight` (tried before this
-   router) has already taken as a weigh-in.
+6. `sport` - a reply to a bot message starting with `Спорт:` or `Sport:` (`i18n.SPORT_PREFIXES`),
+   the counterpart of `corrections` for an activity; `sport.SportReply` sorts it into three
+   mutually exclusive kinds, like `corrections.CorrectionReply`. A delete word
+   (`parsing.is_delete_request`, the narrow vocabulary) -> `delete_sport_entry`, registered first.
+   A bare number -> `update_sport_kcal`, "Виправив: N ккал." with no day total (sport replies never
+   had one); the row keeps its `message_id`. Any other text -> `get_sport_entry`,
+   `GeminiClient.revise_sport` with the earlier record ({activity, minutes, distance_km}) + the
+   user's text, the kcal recomputed from the MET table for the sender's last known weight (as
+   `record_sport` does) -> a new confirmation with the "corrected" mark, still naming the day of a
+   backdated row -> `update_sport_entry`, which rewrites activity, minutes, distance and kcal and
+   re-keys the row to the new confirmation so corrections can be chained; `date`, `ts` and
+   `source` never change. Two kinds of reply are matched by none of the three: the food-only
+   regret phrases (`is_food_cancel_request` - no reply, no Gemini call, the row untouched) and a
+   reply `weight.weigh_in` claims, which `weight` (tried before this router) has already taken.
+   All three are scoped to the sender, so only the author of an activity can correct or delete
+   it.
 
 Recording sport has no router of its own: free text is never scanned for sport keywords (too many
 false positives in a chatty group), so `sport.record_sport` is reached only from `/sport` and its
@@ -145,9 +156,9 @@ costs no lookup), injects `lang` from `get_lang` - the cached `users` tab - and 
 again. Both lookups fall back to Ukrainian with a WARNING instead of raising: a Sheets outage must
 not turn `/help` into an error, nor swallow the error reply it is reporting. A correction or delete
 is answered in its sender's language, who is always the entry's author.
-What the model writes for a person follows them too: `estimate_food`, `revise_food` and
-`parse_sport` take `lang`, the food prompts ask for the dish, portion and notes in that language
-(the sheet's `dish` column therefore holds both), and the sport title comes from
+What the model writes for a person follows them too: `estimate_food`, `revise_food`,
+`parse_sport` and `revise_sport` take `lang`, the food prompts ask for the dish, portion and notes
+in that language (the sheet's `dish` column therefore holds both), and the sport title comes from
 `met.activity_title`. A message to a whole chat - the morning ping and the weekly report with its
 fallbacks - is written in `Jobs.chat_lang`: a DM in its owner's language, a group in the language
 most of its *active* users chose (`i18n.majority_lang`: an unset language votes Ukrainian, a tie
@@ -461,7 +472,7 @@ because of a handler.
 
 **Trailing columns.** `food.portion` (the portion size the model priced, shown on the `≈` line so
 the user can see what the calories were computed for), `sport.message_id` (the confirmation a
-delete replies to), `users.birth_year` / `users.sex` (the profile for the weekly report) and
+correction or a delete replies to), `users.birth_year` / `users.sex` (the profile for the weekly report) and
 `users.lang` (the person's language) are
 the *last* entries of their `HEADERS` lists: an existing spreadsheet then only gains a trailing
 column instead of having every value shifted right.

@@ -288,6 +288,27 @@ async def test_delete_under_a_sport_confirmation_in_either_language(
     assert repo.rows["sport"] == []
 
 
+async def test_an_english_users_sport_correction_is_in_english(harness, repo: FakeRepo) -> None:
+    dp, bot, session, ai = harness
+    hint = en.sport_saved("x", 1, None, 1).splitlines()[-1]
+    await _english(harness, repo)
+    await dp.feed_update(bot, _message("/sport running 5 km 30 min", EN_ID))
+    confirmation = _last(session)
+    assert confirmation.endswith(hint)
+    sport_msg = _bot_message(confirmation, repo.rows["sport"][0]["message_id"])
+
+    await dp.feed_update(bot, _message("it was 45 min", EN_ID, reply_to=sport_msg))
+    assert ai.langs == ["en", "en"]
+    corrected = _last(session)
+    assert corrected.startswith(f"{en.SPORT_PREFIX} running, 45 min")
+    assert en.CORRECTED_MARK in corrected and corrected.endswith(hint)
+
+    ai.sport_revisions = [None]
+    newer = _bot_message(corrected, repo.rows["sport"][0]["message_id"])
+    await dp.feed_update(bot, _message("it was not sport", EN_ID, reply_to=newer))
+    assert _last(session) == en.SPORT_CORRECTION_NOT_UNDERSTOOD
+
+
 @pytest.mark.parametrize("prompt_strings", [en, uk])
 async def test_both_languages_input_prompts_are_recorded(
     harness, repo: FakeRepo, prompt_strings

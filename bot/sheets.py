@@ -33,7 +33,7 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError, WorksheetNotFound
 from gspread.utils import ValueRenderOption
 
-from bot.ai import FoodEstimate
+from bot.ai import FoodEstimate, SportEntry
 from bot.config import WEEKDAYS, Settings, parse_hhmm
 from bot.i18n import DEFAULT_LANG, Lang, normalize_lang
 from bot.parsing import WATER_MAX_INTERVAL_MIN, WATER_MIN_INTERVAL_MIN, WaterSchedule, parse_sex
@@ -335,6 +335,19 @@ def _food_entry(row: dict[str, Any]) -> dict[str, Any]:
     entry: dict[str, Any] = {k: num(row.get(k)) for k in _FOOD_NUMERIC}
     entry.update({k: row.get(k, "") for k in _FOOD_TEXT})
     return entry
+
+
+def _sport_entry(row: dict[str, Any]) -> dict[str, Any]:
+    """One `sport` row the way handlers want it: `minutes` and `kcal` as floats, `distance_km`
+    None when blank (an activity without a distance, not a distance of 0), the rest as strings."""
+    return {
+        "activity": row.get("activity", ""),
+        "minutes": num(row.get("minutes")),
+        "distance_km": num_or_none(row.get("distance_km")),
+        "kcal": num(row.get("kcal")),
+        "date": row.get("date", ""),
+        "source": row.get("source", ""),
+    }
 
 
 class SheetsRepo:
@@ -719,8 +732,9 @@ class SheetsRepo:
         *,
         day: date | None = None,
     ) -> None:
-        # `message_id` is the bot's confirmation, so a reply to it can find this row again;
-        # 0 means "no message to reply to" and simply makes the row undeletable from the chat.
+        # `message_id` is the bot's confirmation, so a reply to it can find this row again (to
+        # correct or delete it); 0 means "no message to reply to" and simply puts the row out of
+        # the chat's reach.
         # `day` backdates the workout the way it backdates a meal: `date` is what the reports
         # group by, `ts` remains when the activity was logged.
         row = [
@@ -746,57 +760,56 @@ class SheetsRepo:
 
     # -- updates ----------------------------------------------------------------------------
 
+    def _find_row_sync(
+        self, tab: Literal["food", "sport"], user_id: int, message_id: int
+    ) -> tuple[int, dict[str, str]] | None:
+        """Locate the `tab` row that belongs to `user_id` and was announced in `message_id`.
+
+        Telegram message ids are per-chat counters, so `message_id` alone is ambiguous when the
+        bot serves several groups; scoping by the owner also stops members from correcting or
+        throwing away each other's entries. Returns the 1-based sheet row number and the row as
+        `{header: cell}`.
+        """
+        rows = with_retry(self._ws(tab).get_all_values)
+        col_uid = HEADERS[tab].index("user_id")
+        col_msg = HEADERS[tab].index("message_id")
+        for idx, row in enumerate(rows[1:], start=2):
+            if (
+                len(row) > col_msg
+                and row[col_msg] == str(message_id)
+                and row[col_uid] == str(user_id)
+            ):
+                return idx, dict(zip(HEADERS[tab], row, strict=False))
+        return None
+
     def _find_food_row_sync(
         self, user_id: int, message_id: int
     ) -> tuple[int, dict[str, str]] | None:
-        """Locate the food row that belongs to `user_id` and was announced in `message_id`.
+        return self._find_row_sync("food", user_id, message_id)
 
-        Telegram message ids are per-chat counters, so `message_id` alone is ambiguous when the
-        bot serves several groups; scoping by the owner also stops members from correcting each
-        other's entries. Returns the 1-based sheet row number and the row as `{header: cell}`.
-        """
-        rows = with_retry(self._ws("food").get_all_values)
-        col_uid = HEADERS["food"].index("user_id")
-        col_msg = HEADERS["food"].index("message_id")
-        for idx, row in enumerate(rows[1:], start=2):
-            if (
-                len(row) > col_msg
-                and row[col_msg] == str(message_id)
-                and row[col_uid] == str(user_id)
-            ):
-                return idx, dict(zip(HEADERS["food"], row, strict=False))
-        return None
+    def _find_sport_row_sync(
+        self, user_id: int, message_id: int
+    ) -> tuple[int, dict[str, str]] | None:
+        return self._find_row_sync("sport", user_id, message_id)
 
-    def _find_sport_row_sync(self, user_id: int, message_id: int) -> int | None:
-        """1-based row number of `user_id`'s sport row announced in `message_id`, or None.
-
-        Scoped by owner for the same reasons as `_find_food_row_sync`: Telegram message ids are
-        per-chat counters, and nobody may throw away somebody else's activity.
-        """
-        rows = with_retry(self._ws("sport").get_all_values)
-        col_uid = HEADERS["sport"].index("user_id")
-        col_msg = HEADERS["sport"].index("message_id")
-        for idx, row in enumerate(rows[1:], start=2):
-            if (
-                len(row) > col_msg
-                and row[col_msg] == str(message_id)
-                and row[col_uid] == str(user_id)
-            ):
-                return idx
-        return None
-
-    def _update_food_cells_sync(
-        self, user_id: int, message_id: int, values: dict[str, Any]
+    def _update_cells_sync(
+        self,
+        tab: Literal["food", "sport"],
+        user_id: int,
+        message_id: int,
+        values: dict[str, Any],
     ) -> bool:
-        found = self._find_food_row_sync(user_id, message_id)
+        """Write `values` (`{header: value}`) into `user_id`'s `tab` row announced in
+        `message_id`, in one request; False when there is no such row."""
+        found = self._find_row_sync(tab, user_id, message_id)
         if found is None:
             return False
         row_no, _ = found
         with_retry(
-            self._ws("food").batch_update,
+            self._ws(tab).batch_update,
             [
                 {
-                    "range": gspread.utils.rowcol_to_a1(row_no, HEADERS["food"].index(col) + 1),
+                    "range": gspread.utils.rowcol_to_a1(row_no, HEADERS[tab].index(col) + 1),
                     "values": [[value]],
                 }
                 for col, value in values.items()
@@ -813,7 +826,8 @@ class SheetsRepo:
         """Set `kcal` on the food row announced in `message_id`; False if it is not the sender's."""
         async with self._row_lock:
             return await self._run(
-                self._update_food_cells_sync,
+                self._update_cells_sync,
+                "food",
                 user_id,
                 message_id,
                 {"kcal": kcal, "corrected": "TRUE"},
@@ -838,7 +852,40 @@ class SheetsRepo:
             "corrected": "TRUE",
         }
         async with self._row_lock:
-            return await self._run(self._update_food_cells_sync, user_id, message_id, values)
+            return await self._run(self._update_cells_sync, "food", user_id, message_id, values)
+
+    async def get_sport_entry(self, user_id: int, message_id: int) -> dict[str, Any] | None:
+        """The stored activity behind a bot sport confirmation (`_sport_entry`), or None."""
+        found = await self._run(self._find_sport_row_sync, user_id, message_id)
+        return None if found is None else _sport_entry(found[1])
+
+    async def update_sport_kcal(self, user_id: int, message_id: int, kcal: float) -> bool:
+        """Set `kcal` on the sport row announced in `message_id`; False if it is not the
+        sender's. The row keeps its message_id, like a food kcal correction."""
+        async with self._row_lock:
+            return await self._run(
+                self._update_cells_sync, "sport", user_id, message_id, {"kcal": kcal}
+            )
+
+    async def update_sport_entry(
+        self, user_id: int, message_id: int, entry: SportEntry, new_message_id: int
+    ) -> bool:
+        """Replace the activity after a free-text correction and re-key the row to the bot's new
+        confirmation, so the next correction can be made on that one.
+
+        `activity` gets the display title, as `add_sport` stores it. `date`, `ts` and `source`
+        are left alone: a correction says what the activity was, not when it happened. There is
+        no `corrected` flag for sport - nothing would read it, and it would cost a new column.
+        """
+        values: dict[str, Any] = {
+            "activity": entry.title,
+            "minutes": entry.minutes,
+            "distance_km": _blank(entry.distance_km),
+            "kcal": entry.kcal,
+            "message_id": new_message_id,
+        }
+        async with self._row_lock:
+            return await self._run(self._update_cells_sync, "sport", user_id, message_id, values)
 
     # -- deletions --------------------------------------------------------------------------
 
@@ -896,9 +943,10 @@ class SheetsRepo:
         return None if row is None else _food_entry(row)
 
     def _delete_sport_row_sync(self, user_id: int, message_id: int) -> bool:
-        row_no = self._find_sport_row_sync(user_id, message_id)
-        if row_no is None:
+        found = self._find_sport_row_sync(user_id, message_id)
+        if found is None:
             return False
+        row_no, _ = found
         return self._delete_confirmed_row_sync("sport", row_no, user_id, message_id) is not None
 
     async def delete_sport_entry(self, user_id: int, message_id: int) -> bool:

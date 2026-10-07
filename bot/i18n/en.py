@@ -55,6 +55,7 @@ __all__ = [
     "PROFILE_SET",
     "PROFILE_USAGE",
     "PROMPT_CANCELLED",
+    "SPORT_CORRECTION_NOT_UNDERSTOOD",
     "SPORT_DELETED",
     "SPORT_INPUT_PROMPT",
     "SPORT_INPUT_PROMPT_PREFIX",
@@ -109,7 +110,8 @@ HELP = (
     "What I understand:\n"
     "- a food photo (a caption helps) - I estimate the calories and log them;\n"
     "- a number such as <code>84.3</code> - I log it as your weight;\n"
-    "- a number in reply to my food message - I correct the estimate.\n\n"
+    "- a reply to my food or sport message (a number of kcal or a clarification) - "
+    "I correct the entry.\n\n"
     "Commands:\n"
     "/w 84.3 - log your weight\n"
     "/food borscht and two slices of bread - log food as text; without text I will ask\n"
@@ -125,7 +127,8 @@ HELP = (
     "/water weekdays from 9 to 18 every 30 min - reminders to drink water, in private messages\n"
     "/lang uk - switch to Ukrainian (перейти на українську)\n"
     "/help - this help\n\n"
-    "Photo estimates are rough (±30-50%). To correct one, reply to it with a number of kcal.\n"
+    "Photo estimates are rough (±30-50%). To correct a food or sport entry, reply to it with a "
+    "number of kcal or a clarification.\n"
     'To remove a food or activity entry, reply "delete" to it.'
 )
 
@@ -212,6 +215,10 @@ SPORT_NOT_RECOGNIZED = (
 SPORT_SAVED = SPORT_PREFIX + " {activity}, {minutes} min{distance} - about {kcal} kcal."
 SPORT_SAVED_DATE = (
     SPORT_PREFIX + " {activity}, {minutes} min{distance} - about {kcal} kcal. Logged for {date}."
+)
+SPORT_CORRECTION_NOT_UNDERSTOOD = (
+    "I did not understand the correction. "
+    "Tell me what to change: the duration, the distance or the kind of activity."
 )
 SPORT_DELETED = "Deleted the activity entry."
 SPORT_NOT_FOUND_FOR_DELETE = "Could not find the entry to delete."
@@ -407,17 +414,28 @@ def sport_saved(
     distance_km: float | None,
     kcal: float,
     date_str: str | None = None,
+    *,
+    corrected: bool = False,
 ) -> str:
-    """Confirmation for a stored activity; `date_str` names the day when it is not today."""
+    """Confirmation for a stored or corrected activity. Must start with SPORT_PREFIX."""
     distance = f", {distance_km:g} km" if distance_km else ""
     template = SPORT_SAVED if date_str is None else SPORT_SAVED_DATE
-    return template.format(
-        activity=escape(activity_title),
-        minutes=f"{minutes:.0f}",
-        distance=distance,
-        kcal=f"{kcal:.0f}",
-        date=date_str,
+    lines = [
+        template.format(
+            activity=escape(activity_title),
+            minutes=f"{minutes:.0f}",
+            distance=distance,
+            kcal=f"{kcal:.0f}",
+            date=date_str,
+        )
+    ]
+    if corrected:
+        lines.append(CORRECTED_MARK)
+    lines.append(
+        "To correct it, reply to this message with a number of kcal or a clarification "
+        "(duration, distance, kind of activity)."
     )
+    return "\n".join(lines)
 
 
 def today_summary(

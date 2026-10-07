@@ -6,6 +6,7 @@ ignored) and that the allowed-chat gate works. Gemini and Sheets are replaced by
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncGenerator
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -21,7 +22,7 @@ from aiogram.methods.base import TelegramType
 from aiogram.types import Chat, Message, PhotoSize, Update
 from aiogram.types import User as TgUser
 
-from bot import i18n
+from bot import i18n, met
 from bot.ai import FoodEstimate, ModelOverloaded, QuotaExceeded, RetryNotice, SportEntry
 from bot.config import Settings
 from bot.handlers import build_router
@@ -90,6 +91,10 @@ class FakeAI:
     def __init__(self) -> None:
         self.sport_calls: list[str] = []
         self.revise_calls: list[tuple[str, str]] = []
+        # (earlier activity, correction) of every revise_sport call, and its scripted answers
+        # in order - an empty list answers "running, 45 min" in the caller's language
+        self.sport_revise_calls: list[tuple[str, str]] = []
+        self.sport_revisions: list[SportEntry | None] = []
         self.estimate_calls: list[str | None] = []  # the caption of every estimate_food call
         self.food_estimates: list[FoodEstimate] = []  # answers for estimate_food, in order
         self.langs: list[str] = []  # the `lang` every AI call was made with, in order
@@ -177,6 +182,23 @@ class FakeAI:
         self.langs.append(lang)
         title = "running" if lang == "en" else "біг"
         return SportEntry(activity="running", title=title, minutes=30, distance_km=5, kcal=390)
+
+    async def revise_sport(
+        self,
+        previous: dict[str, Any],
+        correction: str,
+        weight_kg: float | None,
+        on_retry: RetryNotice | None = None,
+        *,
+        lang: str,
+    ) -> SportEntry | None:
+        self._check_call(self.text_model)
+        self.sport_revise_calls.append((str(previous["activity"]), correction))
+        self.langs.append(lang)
+        if self.sport_revisions:
+            return self.sport_revisions.pop(0)
+        title = "running" if lang == "en" else "біг"
+        return SportEntry(activity="running", title=title, minutes=45, distance_km=5, kcal=585)
 
 
 class FakeJobs:
@@ -285,18 +307,42 @@ async def test_a_number_replying_to_us_is_a_weigh_in_replying_to_a_person_is_not
     assert len(repo.rows["weight"]) == 2  # a number replying to a person is ignored
 
 
-async def test_a_number_replying_to_a_sport_confirmation_is_a_weigh_in(
+async def test_a_bare_number_replying_to_a_sport_confirmation_corrects_its_kcal(
     harness, repo: FakeRepo
 ) -> None:
-    """The sport router only deletes, so a number under a confirmation used to be dropped."""
-    dp, bot, session, _ = harness
+    """Under a confirmation a bare integer is a kcal correction, as under a food estimate - even
+    one inside the weight range, which used to be logged as a weigh-in."""
+    dp, bot, session, ai = harness
     await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
     sport_msg = _bot_message(session.sent[-1]["text"], 1001)
 
-    await dp.feed_update(bot, _update("84", reply_to=sport_msg, message_id=2))
+    await dp.feed_update(bot, _update("350", reply_to=sport_msg, message_id=2))
+    row = repo.rows["sport"][0]
+    assert row["kcal"] == 350
+    assert session.sent[-1]["text"] == "Виправив: 350 ккал."
+    assert row["message_id"] == 1001  # still keyed to the confirmation replied to
+
+    await dp.feed_update(bot, _update("84", reply_to=sport_msg, message_id=3))
+    assert repo.rows["sport"][0]["kcal"] == 84
+    assert session.sent[-1]["text"] == i18n.uk.CORRECTION_SAVED.format(kcal="84")
+    assert repo.rows["weight"] == []
+    assert ai.sport_revise_calls == []  # a number never goes to Gemini
+
+
+@pytest.mark.parametrize("text", ["84.3", "84 кг", "вага 84"])
+async def test_a_marked_weight_replying_to_a_sport_confirmation_is_a_weigh_in(
+    harness, repo: FakeRepo, text: str
+) -> None:
+    dp, bot, session, ai = harness
+    await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
+    sport_msg = _bot_message(session.sent[-1]["text"], 1001)
+    before = dict(repo.rows["sport"][0])
+
+    await dp.feed_update(bot, _update(text, reply_to=sport_msg, message_id=2))
     row = repo.rows["weight"][0]
-    assert (row["kg"], row["source"]) == (84.0, "reply")
-    assert len(repo.rows["sport"]) == 1  # the activity is untouched
+    assert row["source"] == "reply" and row["kg"] in (84.3, 84.0)
+    assert repo.rows["sport"] == [before]  # the activity is untouched
+    assert ai.sport_revise_calls == []
 
 
 async def test_reply_to_food_estimate_is_correction(harness, repo: FakeRepo, user) -> None:
@@ -985,17 +1031,21 @@ async def test_a_regret_phrase_deletes_the_food_row(harness, repo: FakeRepo, set
     assert session.sent[-1]["text"] == f"{i18n.uk.FOOD_DELETED} {i18n.uk.day_total(500, 2000)}"
 
 
-async def test_a_regret_phrase_does_not_delete_a_sport_row(harness, repo: FakeRepo) -> None:
-    """The wider cancel vocabulary is food-only: `sport.SportDeleteReply` still asks for a delete
-    verb, so "я випадково" under a confirmation falls through and is ignored."""
-    dp, bot, session, _ = harness
+@pytest.mark.parametrize("text", ["я випадково", "це жарт", "не записуй"])
+async def test_a_regret_phrase_does_not_touch_a_sport_row(
+    harness, repo: FakeRepo, text: str
+) -> None:
+    """The wider cancel vocabulary is food-only: `sport.SportReply` still asks for a delete verb,
+    and refuses a regret phrase as a text correction too - so it falls through and is ignored."""
+    dp, bot, session, ai = harness
     await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
     sport_msg = _bot_message(session.sent[-1]["text"], 1001)
-    sent_before = len(session.sent)
+    sent_before, before = len(session.sent), dict(repo.rows["sport"][0])
 
-    await dp.feed_update(bot, _update("я випадково", reply_to=sport_msg, message_id=2))
-    assert len(repo.rows["sport"]) == 1
+    await dp.feed_update(bot, _update(text, reply_to=sport_msg, message_id=2))
+    assert repo.rows["sport"] == [before]
     assert len(session.sent) == sent_before  # no reply at all
+    assert ai.sport_revise_calls == []  # and no Gemini call
 
 
 async def test_a_regret_phrase_answering_the_food_prompt_is_food(harness, repo: FakeRepo) -> None:
@@ -1093,20 +1143,122 @@ async def test_reply_videly_deletes_the_sport_row(harness, repo: FakeRepo) -> No
     assert session.sent[-1]["text"] == i18n.uk.SPORT_NOT_FOUND_FOR_DELETE
 
 
-async def test_a_non_delete_reply_to_a_sport_confirmation_is_ignored(
+async def test_a_text_reply_to_a_sport_confirmation_corrects_that_activity(
     harness, repo: FakeRepo
 ) -> None:
-    """The sport router deletes and nothing else: re-estimating an activity is out of scope, and
-    a reply must not become a second workout the way free text used to."""
+    """Any other text under a confirmation revises the activity it announced: it must not become
+    a second workout the way free text used to."""
     dp, bot, session, ai = harness
     await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
     sport_msg = _bot_message(session.sent[-1]["text"], 1001)
-    sent_before, rows_before = len(session.sent), len(repo.rows["sport"])
 
     await dp.feed_update(bot, _update("біг 10 км", reply_to=sport_msg, message_id=2))
-    assert len(session.sent) == sent_before  # no reply at all
-    assert len(repo.rows["sport"]) == rows_before  # and no second row
-    assert ai.sport_calls == ["біг 5 км 30 хв"]  # Gemini saw only the command
+    assert ai.sport_calls == ["біг 5 км 30 хв"]  # parsed once, by the command
+    assert ai.sport_revise_calls == [("біг", "біг 10 км")]
+    assert len(repo.rows["sport"]) == 1  # no second row
+    assert session.sent[-1]["text"].startswith(i18n.uk.SPORT_PREFIX)
+
+
+def _hint(strings: Any) -> str:
+    """The last line of every sport confirmation: how to correct it."""
+    return strings.sport_saved("x", 30, None, 300).splitlines()[-1]
+
+
+async def test_a_text_correction_reparses_the_activity_and_rekeys_the_row(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    """End to end through the real `GeminiClient`: the prompt carries the earlier record and the
+    correction, the kcal comes from the MET table, and the row moves to the new confirmation so
+    the next correction can be made on that one."""
+    dp, bot, session, _ = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій")
+    await repo.upsert_user(me)
+    await repo.add_weight(me, 70, user_now(me, settings) - timedelta(days=1), "text")
+    await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
+    before = dict(repo.rows["sport"][0])
+    sport_msg = _bot_message(session.sent[-1]["text"], 1001)
+
+    gemini, models = client_with(
+        [
+            json.dumps({"activity": "running", "minutes": 45, "distance_km": 5}),
+            json.dumps({"activity": "walking", "minutes": 60, "distance_km": None}),
+        ]
+    )
+    dp.workflow_data["ai"] = gemini
+    await dp.feed_update(bot, _update("це було 45 хв", reply_to=sport_msg, message_id=2))
+
+    prompt = models.contents[0][0]
+    assert '"activity": "біг"' in prompt and '"minutes": 30' in prompt
+    assert "<<<\nце було 45 хв\n>>>" in prompt
+    reply = session.sent[-1]["text"]
+    assert reply.startswith(f"{i18n.uk.SPORT_PREFIX} біг, 45 хв")
+    assert i18n.uk.CORRECTED_MARK in reply and reply.endswith(_hint(i18n.uk))
+    row = repo.rows["sport"][0]
+    assert (row["minutes"], row["kcal"]) == (45, met.estimate_kcal("running", 45, 70, 5)[1])
+    assert row["message_id"] == 1002  # re-keyed to the bot's new reply (MockSession ids)
+    assert await repo.get_sport_entry(ME, 1001) is None
+    assert [row[k] for k in ("date", "ts", "source")] == [
+        before[k] for k in ("date", "ts", "source")
+    ]
+
+    # ... so the next correction replies to the new confirmation
+    newer = _bot_message(reply, 1002)
+    await dp.feed_update(bot, _update("не біг, а ходьба годину", reply_to=newer, message_id=3))
+    assert '"minutes": 45.0' in models.contents[1][0]
+    row = repo.rows["sport"][0]
+    assert (row["activity"], row["minutes"], row["distance_km"]) == (
+        met.ACTIVITIES["walking"].title,
+        60,
+        "",
+    )
+    assert row["message_id"] == 1003 and len(repo.rows["sport"]) == 1
+
+
+async def test_a_text_correction_of_a_backdated_activity_keeps_its_date(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    dp, bot, session, _ = harness
+    await dp.feed_update(bot, _update("/спорт вчора волейбол 2 години"))
+    yesterday = _yesterday_iso(settings)
+    sport_msg = _bot_message(session.sent[-1]["text"], 1001)
+
+    await dp.feed_update(bot, _update("це було 45 хв", reply_to=sport_msg, message_id=2))
+    reply = session.sent[-1]["text"]
+    assert f"Записано за {yesterday}." in reply.splitlines()[0]
+    assert i18n.uk.CORRECTED_MARK in reply and reply.endswith(_hint(i18n.uk))
+    row = repo.rows["sport"][0]
+    assert (row["date"], row["minutes"], row["message_id"]) == (yesterday, 45, 1002)
+
+
+async def test_only_the_owner_can_correct_an_activity(harness, repo: FakeRepo, user) -> None:
+    dp, bot, session, ai = harness
+    # `user` (id 1) owns the row; the sender (ME) replies to its confirmation
+    await repo.add_sport(user, "біг", 30, 5, 390, datetime.now(), "command", message_id=778)
+    sport_msg = _bot_message(i18n.uk.sport_saved("біг", 30, 5, 390), 778)
+    before = dict(repo.rows["sport"][0])
+
+    await dp.feed_update(bot, _update("350", reply_to=sport_msg))
+    assert session.sent[-1]["text"] == i18n.uk.CORRECTION_NOT_FOUND
+    await dp.feed_update(bot, _update("це було 45 хв", reply_to=sport_msg, message_id=2))
+    assert session.sent[-1]["text"] == i18n.uk.CORRECTION_NOT_FOUND
+    assert ai.sport_revise_calls == []  # refused before Gemini
+    assert repo.rows["sport"] == [before]
+
+
+async def test_an_activity_correction_the_model_cannot_map_is_not_understood(
+    harness, repo: FakeRepo
+) -> None:
+    dp, bot, session, _ = harness
+    await dp.feed_update(bot, _update("/sport біг 5 км 30 хв"))
+    before = dict(repo.rows["sport"][0])
+    sport_msg = _bot_message(session.sent[-1]["text"], 1001)
+    gemini, models = client_with([json.dumps({"activity": "none"})])
+    dp.workflow_data["ai"] = gemini
+
+    await dp.feed_update(bot, _update("це був не спорт", reply_to=sport_msg, message_id=2))
+    assert models.calls == 1
+    assert session.sent[-1]["text"] == i18n.uk.SPORT_CORRECTION_NOT_UNDERSTOOD
+    assert repo.rows["sport"] == [before]
 
 
 async def test_the_food_estimate_shows_the_portion(harness, repo: FakeRepo) -> None:
@@ -1210,7 +1362,8 @@ async def test_sport_command_with_yesterday_is_dated_yesterday(
     assert ai.sport_calls == ["волейбол 2 години"]
     assert repo.rows["sport"][0]["date"] == yesterday
     reply = session.sent[-1]["text"]
-    assert reply.startswith(i18n.uk.SPORT_PREFIX) and reply.endswith(f"Записано за {yesterday}.")
+    assert reply.startswith(i18n.uk.SPORT_PREFIX) and reply.endswith(_hint(i18n.uk))
+    assert reply.splitlines()[0].endswith(f"Записано за {yesterday}.")
 
 
 async def test_a_yesterday_reply_to_the_food_prompt_is_dated_yesterday(

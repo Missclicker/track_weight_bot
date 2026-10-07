@@ -53,6 +53,7 @@ __all__ = [
     "PROFILE_SET",
     "PROFILE_USAGE",
     "PROMPT_CANCELLED",
+    "SPORT_CORRECTION_NOT_UNDERSTOOD",
     "SPORT_DELETED",
     "SPORT_INPUT_PROMPT",
     "SPORT_INPUT_PROMPT_PREFIX",
@@ -98,9 +99,9 @@ __all__ = [
     "weekly_stats_block",
 ]
 
-# Replies to bot messages starting with this can delete the activity. Like every other prefix in
-# here it must not collide with the English one: routing recognises a bot message by its text,
-# whichever language it was sent in (see `bot.i18n.SPORT_PREFIXES`).
+# Replies to bot messages starting with this correct or delete the activity. Like every other
+# prefix in here it must not collide with the English one: routing recognises a bot message by its
+# text, whichever language it was sent in (see `bot.i18n.SPORT_PREFIXES`).
 SPORT_PREFIX = "Спорт:"
 
 PRIVATE_CHAT_ONLY_GROUP = "Цей бот працює лише в груповому чаті."
@@ -110,7 +111,8 @@ HELP = (
     "Що я розумію:\n"
     "- фото їжі (можна з підписом) - оціню калорії і запишу;\n"
     "- число, наприклад <code>84.3</code> - запишу як вагу;\n"
-    "- відповідь числом на моє повідомлення про їжу - виправлю оцінку.\n\n"
+    "- відповідь на моє повідомлення про їжу чи спорт (число ккал або уточнення) - "
+    "виправлю запис.\n\n"
     "Команди (працюють і українською):\n"
     "/w 84.3 або /вага 84.3 - записати вагу\n"
     "/food борщ і два хліба або /їжа ... - записати їжу текстом; без тексту - запитаю\n"
@@ -126,7 +128,8 @@ HELP = (
     "/water будні з 9 до 18 кожні 30 хв або /вода ... - нагадування пити воду в особисті\n"
     "/lang en або /мова en - перейти на англійську (switch to English)\n"
     "/help або /довідка - ця довідка\n\n"
-    "Оцінки з фото приблизні (±30-50 %). Щоб виправити - відповідай на оцінку числом ккал.\n"
+    "Оцінки з фото приблизні (±30-50 %). Щоб виправити запис про їжу чи спорт - відповідай на "
+    "нього числом ккал або уточненням.\n"
     'Щоб прибрати запис про їжу чи активність - відповідай на нього "видали" або '
     '"видали цей запис".'
 )
@@ -224,9 +227,13 @@ SPORT_INPUT_PROMPT = (
 SPORT_NOT_RECOGNIZED = 'Не розпізнав активність. Спробуй так: "біг 5 км 30 хв" або "зал 1 година".'
 SPORT_SAVED = SPORT_PREFIX + " {activity}, {minutes} хв{distance} - близько {kcal} ккал."
 # The backdated variant. Still starts with SPORT_PREFIX, because that prefix is how a reply is
-# recognised as a delete request for this row.
+# recognised as a correction or a delete request for this row.
 SPORT_SAVED_DATE = (
     SPORT_PREFIX + " {activity}, {minutes} хв{distance} - близько {kcal} ккал. Записано за {date}."
+)
+# A text correction of an activity the model could not map to one (or said was no sport at all).
+SPORT_CORRECTION_NOT_UNDERSTOOD = (
+    "Не зрозумів уточнення. Напиши, що змінити: тривалість, дистанцію або вид активності."
 )
 SPORT_DELETED = "Видалив запис про активність."
 SPORT_NOT_FOUND_FOR_DELETE = "Не знайшов запис для видалення."
@@ -422,17 +429,32 @@ def sport_saved(
     distance_km: float | None,
     kcal: float,
     date_str: str | None = None,
+    *,
+    corrected: bool = False,
 ) -> str:
-    """Confirmation for a stored activity; `date_str` names the day when it is not today."""
+    """Confirmation for a stored or corrected activity. Must start with SPORT_PREFIX.
+
+    `date_str` names the day when it is not today; a corrected backdated row keeps naming it. The
+    last line says how to correct the entry, the same invitation `food_estimate` ends with.
+    """
     distance = f", {distance_km:g} км" if distance_km else ""
     template = SPORT_SAVED if date_str is None else SPORT_SAVED_DATE
-    return template.format(
-        activity=escape(activity_title),
-        minutes=f"{minutes:.0f}",
-        distance=distance,
-        kcal=f"{kcal:.0f}",
-        date=date_str,
+    lines = [
+        template.format(
+            activity=escape(activity_title),
+            minutes=f"{minutes:.0f}",
+            distance=distance,
+            kcal=f"{kcal:.0f}",
+            date=date_str,
+        )
+    ]
+    if corrected:
+        lines.append(CORRECTED_MARK)
+    lines.append(
+        "Щоб виправити - відповідай на це повідомлення числом ккал або уточненням "
+        "(тривалість, дистанція, вид активності)."
     )
+    return "\n".join(lines)
 
 
 def today_summary(
