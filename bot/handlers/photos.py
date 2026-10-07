@@ -6,6 +6,7 @@ the reply and appends the row.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, time, timedelta
 from functools import partial
 from io import BytesIO
@@ -19,7 +20,7 @@ from bot.config import Settings
 from bot.handlers import ensure_user
 from bot.i18n import DEFAULT_LANG, Lang
 from bot.parsing import strip_yesterday
-from bot.reports import day_food
+from bot.reports import day_food, day_sport
 from bot.scheduler import user_now
 from bot.sheets import SheetsRepo, User
 
@@ -50,11 +51,15 @@ async def record_food(
     now = user_now(user, settings)
     day = now.date() - timedelta(days=1) if yesterday else now.date()
     when = now if at is None else datetime.combine(day, at, tzinfo=now.tzinfo)
-    before = await day_food(repo, user.user_id, day)
+    # the day's sport raises its target in the total line; both reads go out at once
+    before, sport = await asyncio.gather(
+        day_food(repo, user.user_id, day), day_sport(repo, user.user_id, day)
+    )
     total_line = strings.day_total(
         before.total_kcal + est.kcal,
         user.daily_kcal_target,
         day.isoformat() if yesterday else None,
+        sport.total_kcal,
     )
     reply = await message.reply(
         strings.food_estimate(

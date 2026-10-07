@@ -723,14 +723,23 @@ async def test_kcal_command_lists_today(harness, repo: FakeRepo, settings: Setti
     await repo.add_food(me, FoodEstimate(dish="омлет <b>", kcal=500), now, "text", 10)
     await repo.add_food(me, FoodEstimate(dish="борщ", kcal=630), now, "photo", 11)
     await repo.add_food(me, FoodEstimate(dish="вчора", kcal=9000), now - timedelta(days=1), "x", 12)
+    await repo.add_sport(me, "біг <i>", 30, 5, 320, now, "text")
+    await repo.add_sport(me, "вчора", 60, None, 8000, now - timedelta(days=1), "text")
     await dp.feed_update(bot, _update("/калорії", message_id=2))
     text = session.sent[-1]["text"]
     assert not text.startswith(i18n.FOOD_PREFIX)  # a reply to it must not count as a correction
+    assert not text.startswith(i18n.SPORT_PREFIXES)  # nor as a sport delete
     at = now.strftime("%H:%M")
     assert f"\n{at} - 500 ккал - омлет &lt;b&gt;\n" in text  # the entry line starts with the time
     assert f"\n{at} - 630 ккал - борщ\n" in text
-    assert "9000" not in text
-    assert text.endswith("Разом: 1130 ккал (ціль 2000).")
+    assert "9000" not in text and "8000" not in text
+    # the food total is the sum of the food lines; the sport raises the target instead
+    assert text.endswith(
+        "Разом: 1130 ккал.\n"
+        "Спорт:\n"
+        f"{at} - біг &lt;i&gt;, 5 км, 30 хв - 320 ккал\n"
+        "Ціль: 2000 + 320 за спорт = 2320 ккал, лишилось 1190."
+    )
 
 
 async def test_kcal_yesterday_lists_the_previous_day(
@@ -752,6 +761,18 @@ async def test_kcal_yesterday_lists_the_previous_day(
     assert "630 ккал - млинці" in text
     assert "500" not in text
     assert text.endswith("Разом: 630 ккал.")
+
+    # yesterday's sport is listed with yesterday's food, today's is not
+    await repo.add_sport(me, "сьогоднішній біг", 30, 5, 390, now, "text")
+    await repo.add_sport(me, "волейбол", 120, None, 700, now - timedelta(days=1), "text")
+    await dp.feed_update(bot, _update("/калорії вчора", message_id=3))
+    text = session.sent[-1]["text"]
+    assert "сьогоднішній" not in text and "390" not in text
+    at = now.strftime("%H:%M")
+    assert text.endswith(
+        f"Разом: 630 ккал.\nСпорт:\n{at} - волейбол, 120 хв - 700 ккал\n"
+        "З урахуванням спорту: -70 ккал."
+    )
 
 
 async def test_corrections_report_the_day_total(harness, repo: FakeRepo, settings: Settings):
@@ -779,6 +800,20 @@ async def test_corrections_report_the_day_total(harness, repo: FakeRepo, setting
     await dp.feed_update(bot, _update("800", reply_to=pizza, message_id=3))
     assert i18n.uk.day_total(800, 2000, old.date().isoformat()) in session.sent[-1]["text"]
 
+    # that day's sport - and only that day's - raises the target in a correction reply
+    await repo.add_sport(me, "біг", 30, 5, 320, old, "text")
+    await repo.add_sport(me, "зал", 60, None, 999, now, "text")
+    await dp.feed_update(bot, _update("700", reply_to=pizza, message_id=4))
+    assert session.sent[-1]["text"] == (
+        f"Виправив: 700 ккал. Разом за {old.date().isoformat()}: 700 ккал "
+        "(ціль 2000 + 320 за спорт)."
+    )
+    omelet = _bot_message(i18n.FOOD_PREFIX + " 500 ккал - омлет", 10)
+    await dp.feed_update(bot, _update("400", reply_to=omelet, message_id=5))
+    assert session.sent[-1]["text"] == (
+        "Виправив: 400 ккал. Разом за сьогодні: 1120 ккал (ціль 2000 + 999 за спорт)."
+    )
+
 
 async def test_target_command_sets_shows_and_clears(harness, repo: FakeRepo, settings) -> None:
     dp, bot, session, ai = harness
@@ -798,9 +833,9 @@ async def test_target_command_sets_shows_and_clears(harness, repo: FakeRepo, set
     await dp.feed_update(bot, _update("/food омлет", message_id=4))
     assert "Разом за сьогодні: 500 ккал (ціль 2000)." in session.sent[-1]["text"]
     await dp.feed_update(bot, _update("/kcal", message_id=5))
-    assert session.sent[-1]["text"].endswith("Разом: 500 ккал (ціль 2000).")
+    assert session.sent[-1]["text"].endswith("Разом: 500 ккал.\nЦіль: 2000 ккал, лишилось 1500.")
     await dp.feed_update(bot, _update("/today", message_id=6))
-    assert "(ціль 2000)" in session.sent[-1]["text"]
+    assert "\nЦіль: 2000 ккал, лишилось 1500" in session.sent[-1]["text"]
 
     await dp.feed_update(bot, _update("/ціль 100", message_id=7))
     assert session.sent[-1]["text"].startswith("Денна ціль по калоріях")
@@ -811,9 +846,9 @@ async def test_target_command_sets_shows_and_clears(harness, repo: FakeRepo, set
     assert session.sent[-1]["text"] == i18n.uk.TARGET_CLEARED
     assert (await repo.get_user(ME, CHAT_ID)).daily_kcal_target is None
     await dp.feed_update(bot, _update("/kcal", message_id=9))
-    assert "ціль" not in session.sent[-1]["text"]
+    assert "ціль" not in session.sent[-1]["text"].lower()
     await dp.feed_update(bot, _update("/today", message_id=10))
-    assert "ціль" not in session.sent[-1]["text"]
+    assert "ціль" not in session.sent[-1]["text"].lower()
 
 
 async def test_profile_command_sets_shows_changes_and_clears(
@@ -1198,6 +1233,39 @@ async def test_a_yesterday_total_counts_only_yesterday(
     ai.food_estimates = [FoodEstimate(dish="млинці", kcal=500)]
     await dp.feed_update(bot, _update("/їжа вчора млинці"))
     assert i18n.uk.day_total(800, None, _yesterday_iso(settings)) in session.sent[-1]["text"]
+
+
+async def test_food_reply_total_credits_that_days_sport(
+    harness, repo: FakeRepo, settings: Settings
+) -> None:
+    """The running total raises the target by the sport of the entry's own day, never by
+    another day's, and leaves the food total as it is."""
+    dp, bot, session, ai = harness
+    me = User(user_id=ME, chat_id=CHAT_ID, name="Олексій", daily_kcal_target=2000)
+    await repo.upsert_user(me)
+    now = user_now(me, settings)
+
+    ai.food_estimates = [FoodEstimate(dish="омлет", kcal=500)]
+    await dp.feed_update(bot, _update("/food омлет"))
+    assert "Разом за сьогодні: 500 ккал (ціль 2000)." in session.sent[-1]["text"]
+
+    await repo.add_sport(me, "біг", 30, 5, 320, now, "text")
+    await repo.add_sport(me, "волейбол", 120, None, 700, now - timedelta(days=1), "text")
+    ai.food_estimates = [FoodEstimate(dish="борщ", kcal=630)]
+    await dp.feed_update(bot, _update("/food борщ", message_id=2))
+    assert "Разом за сьогодні: 1130 ккал (ціль 2000 + 320 за спорт)." in session.sent[-1]["text"]
+
+    # a backdated meal is set against yesterday's sport
+    ai.food_estimates = [FoodEstimate(dish="млинці", kcal=400)]
+    await dp.feed_update(bot, _update("/їжа вчора млинці", message_id=3))
+    yesterday = _yesterday_iso(settings)
+    assert f"Разом за {yesterday}: 400 ккал (ціль 2000 + 700 за спорт)." in session.sent[-1]["text"]
+
+    # /today shows the sport as a credit, no minus, and the same budget /kcal does
+    await dp.feed_update(bot, _update("/today", message_id=4))
+    today = session.sent[-1]["text"]
+    assert "\nСпорт: 30 хв, 320 ккал\n" in today and "-320" not in today
+    assert today.endswith("\nЦіль: 2000 + 320 за спорт = 2320 ккал, лишилось 1190")
 
 
 async def test_sport_command_with_yesterday_is_dated_yesterday(

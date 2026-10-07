@@ -28,7 +28,7 @@ Telegram  <-- long polling -->  bot (aiogram)  --->  Google Sheets (gspread, thr
 | `bot/fallback.py` | `GroqClient`: one Groq chat completion for a Gemini-shaped call - prompt strings and image `Part`s translated into chat content parts, the vision or text model picked by whether an image is present, a strict `json_schema` response format built from a pydantic schema by `strict_schema` plus a completeness check on the answer, an output cap on every request, reasoning kept out of the answer. Single attempt, no cooldowns (see *Groq fallback*). Not named `groq.py`, which would shadow the SDK. |
 | `bot/sheets.py` | `SheetsRepo`: async facade over gspread (`asyncio.to_thread`), retry with backoff on 429/5xx, 60 s cache of the `users` tab, tab/header definitions; `set_lang` / `get_lang` for the person's language. |
 | `bot/init_sheets.py` | `python -m bot.init_sheets` - idempotent schema creation, prints the sheet URL and row counts. |
-| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `today_summary` and `build_weekly_payload` (the JSON given to Gemini: per person the week's totals and per-logged-day averages, energy shares, a `days` list, late meals, the `nutrition.py` numbers and a `previous_week` block, both weeks measured by the one `_window_numbers`; three `user_rows_between` reads per person, split into the two windows in memory - see *Nutrition numbers*); two pure helpers for the report text: `previous_advice` (last week's stored report, in either language, minus its header and the prompt's `<<<`/`>>>` markers, or None when it carries no advice) and `split_message` (Telegram-sized pieces of at most 4000 characters). |
+| `bot/reports.py` | Aggregations: `day_food` (per-day food list/total for `/kcal` and the food replies; each entry is a `FoodItem(at, dish, kcal)`, `at` being the `ts` wall clock as "HH:MM"), `day_sport` (the same for the `sport` tab: `SportItem(at, activity, minutes, distance_km, kcal)` entries whose kcal total raises the day's target in `/kcal`, `/today` and the food replies), `today_summary` and `build_weekly_payload` (the JSON given to Gemini: per person the week's totals and per-logged-day averages, energy shares, a `days` list, late meals, the `nutrition.py` numbers and a `previous_week` block, both weeks measured by the one `_window_numbers`; three `user_rows_between` reads per person, split into the two windows in memory - see *Nutrition numbers*); two pure helpers for the report text: `previous_advice` (last week's stored report, in either language, minus its header and the prompt's `<<<`/`>>>` markers, or None when it carries no advice) and `split_message` (Telegram-sized pieces of at most 4000 characters). |
 | `bot/scheduler.py` | `Jobs` (ping per timezone, water tick, weekly report, `chat_lang` - the language of a message to a whole chat) and `build_scheduler`. |
 | `bot/handlers/` | aiogram routers, one file per feature; `__init__.py` assembles them and holds the allowed-chat gate, the `SenderLang` middleware and the global error handler. |
 
@@ -44,20 +44,33 @@ Inside `guarded` the routers are tried in order:
 
 1. `commands` - `/start /help /w /food /sport /today /kcal /target /profile /week /lang`. `/target`
    writes only the `daily_kcal_target` cell (`set_daily_kcal_target`), so other hand-edited
-   columns are untouched; the target is optional and the i18n `_target_suffix` hides it when it is
+   columns are untouched; the target is optional and the i18n `_valid_target` hides it when it is
    missing, zero or not a finite number. `/profile` (`/профіль 1981 ч 180`) stores the optional
    birth year, sex and height the weekly report can use: it merges what the message names into
    the sender's current values and `set_profile` writes only those three cells, but on *every*
    `users` row of the user - they describe the person, not their membership of one chat, and a
    DM must not disagree with the group about somebody's age. A message `parse_profile` cannot
    read in full is answered with the usage text and stores nothing. `/food` and food photos
-   share `photos.record_food`, which reads the sender's food rows for today so the `≈` reply
-   ends with "Разом за сьогодні: N ккал" (the new entry included); `/kcal` lists those rows, each
-   line starting with the time it was logged at, or the meal time stated with it ("07:54 - 390
-   ккал - ..."), read straight off the row's `ts` - it is already in the user's timezone, so no conversion happens. A hand-edited row
-   whose `ts` carries no usable time shows `KCAL_NO_TIME` ("--:--") instead, never midnight.
-   `/kcal вчора` (`strip_yesterday` on the argument) lists the previous day the same way under
-   its own header; any other argument is ignored.
+   share `photos.record_food`, which reads the sender's food and sport rows for the entry's day
+   (`day_food` and `day_sport`, concurrently) so the `≈` reply ends with "Разом за сьогодні: N
+   ккал" (the new entry included), with the target as "(ціль 2000)" or, on a day with sport,
+   "(ціль 2000 + 320 за спорт)"; a correction reply totals its entry's day the same way. `/kcal`
+   lists the food rows, each line starting with the time it was logged at, or the meal time
+   stated with it ("07:54 - 390 ккал - ..."), read straight off the row's `ts` - it is already in
+   the user's timezone, so no conversion happens. A hand-edited row whose `ts` carries no usable
+   time shows `KCAL_NO_TIME` ("--:--") instead, never midnight. Under the food total ("Разом: N
+   ккал.", always the sum of the lines above it) come the day's sport rows, one per activity
+   ("18:00 - біг, 5 км, 30 хв - 320 ккал"), and then the `budget_line`: sport never shrinks the
+   food total, it raises the day's budget ("goal + exercise") - "Ціль: 2000 + 320 за спорт = 2320
+   ккал, лишилось 1280" (or "понад ціль на N"), "Ціль: 2000 ккал, лишилось 960" without sport,
+   and without a target "З урахуванням спорту: N ккал" on a day with both food and sport. The
+   sport credit is the MET kcal already stored in the `sport` row, the figure its confirmation
+   showed, and every figure is rounded before the sums so the printed arithmetic checks out. The
+   sport block reuses the "Спорт:" words of `SPORT_PREFIX`, which is safe only because it is never
+   the first line: a reply "видали" to a message starting with it deletes a sport row. `/today`
+   prints the same budget line in place of the old net total, and its sport line carries no minus
+   any more. `/kcal вчора` (`strip_yesterday` on the argument) lists the previous day - its food
+   and its sport - the same way under its own header; any other argument is ignored.
    A bare `/food` or `/sport` (tapped from Telegram's command menu) answers with a `ForceReply`
    prompt and the reply to it is recorded - the `InputPrompt` filter recognises the prompt by its
    text prefix, so it survives a restart. Those two handlers are registered in `commands`, the
@@ -115,7 +128,7 @@ prompt reply -> Gemini text parse -> kcal from the MET table -> reply -> `add_sp
 reply's `message_id`, the same ordering `photos.record_food` uses.
 
 **Deletes are hard deletes** (`worksheet.delete_rows`), not a `deleted` flag: every aggregation
-(`day_food`, `today_summary`, `build_weekly_payload`, `user_rows_between`) then stays correct
+(`day_food`, `day_sport`, `today_summary`, `build_weekly_payload`, `user_rows_between`) then stays correct
 without learning about a flag. `delete_food_entry` returns the row it removed so the handler can
 total that entry's day again without a second scan of the tab.
 
@@ -256,7 +269,7 @@ denominator, because the model's kcal and macros do not always agree and the sha
 to ~100), a `days` list (kcal, protein, alcohol and entries per logged day - the day counts against
 a target are taken from these rounded figures, so the two never disagree), `alcohol_days`,
 `meals_per_logged_day` and `days_over_kcal_target` (null without a target that passes the
-i18n `_target_suffix` rule). The protein target is `protein_g_per_kg(age)` x `reference_weight`:
+i18n `_valid_target` rule). The protein target is `protein_g_per_kg(age)` x `reference_weight`:
 1.2 g/kg below 40, 1.5 g/kg from 40. The 0.8 g/kg RDA is for weight-stable adults; a calorie
 deficit raises the need to keep lean mass, and muscle responds less to protein with age (anabolic
 resistance), which is why guidance for older adults sits at 1.0-1.2 g/kg and higher with training

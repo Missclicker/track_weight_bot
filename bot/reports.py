@@ -1,6 +1,6 @@
 """Aggregations over the sheet for `/today`, `/kcal`, the food-reply totals and the weekly report.
 
-Both functions only need the repository interface (`user_rows_between`, `get_active_users`), so
+The builders only need the repository interface (`user_rows_between`, `get_active_users`), so
 they are tested against the in-memory `FakeRepo` in `tests/conftest.py`. The two pure helpers at
 the end prepare the weekly report's text: last week's advice for the prompt and the split into
 Telegram-sized messages.
@@ -68,16 +68,60 @@ async def day_food(repo: Repo, user_id: int, day: date) -> DayFood:
     )
 
 
+class SportItem(NamedTuple):
+    """One logged activity, `(at, activity, minutes, distance_km, kcal)` as a plain tuple."""
+
+    at: str | None  # "HH:MM" like `FoodItem.at`
+    activity: str  # the display title, in the language of whoever logged it
+    minutes: float
+    distance_km: float | None
+    kcal: float  # the MET estimate the sport confirmation showed
+
+
+@dataclass
+class DaySport:
+    """Sport entries of one user for one calendar day, in the order they were logged.
+
+    `total_kcal` is what `/kcal`, `/today` and the food replies add to the day's kcal target.
+    """
+
+    items: list[SportItem]
+
+    @property
+    def total_kcal(self) -> float:
+        return sum(item.kcal for item in self.items)
+
+    @property
+    def total_minutes(self) -> float:
+        return sum(item.minutes for item in self.items)
+
+
+async def day_sport(repo: Repo, user_id: int, day: date) -> DaySport:
+    rows = await repo.user_rows_between("sport", user_id, day, day)
+    return DaySport(
+        [
+            SportItem(
+                ts_time(r.get("ts")),
+                str(r.get("activity", "")),
+                num(r.get("minutes")),
+                num_or_none(r.get("distance_km")),
+                num(r.get("kcal")),
+            )
+            for r in rows
+        ]
+    )
+
+
 async def today_summary(repo: Repo, user: User, today: date) -> TodaySummary:
     """Per-user totals for one calendar day (in the user's timezone)."""
     food = await repo.user_rows_between("food", user.user_id, today, today)
-    sport = await repo.user_rows_between("sport", user.user_id, today, today)
+    sport = await day_sport(repo, user.user_id, today)
     weight = await repo.user_rows_between("weight", user.user_id, today, today)
     return TodaySummary(
         kcal_in=sum(num(r.get("kcal")) for r in food),
         alcohol_kcal=sum(num(r.get("alcohol_kcal")) for r in food),
-        sport_kcal=sum(num(r.get("kcal")) for r in sport),
-        sport_minutes=sum(num(r.get("minutes")) for r in sport),
+        sport_kcal=sport.total_kcal,
+        sport_minutes=sport.total_minutes,
         weight=num_or_none(weight[-1].get("kg")) if weight else None,
         food_entries=len(food),
     )
@@ -268,7 +312,7 @@ async def build_weekly_payload(
         this = _window_numbers(food, sport, weights, reference_kg)
         maintenance = nutrition.maintenance_kcal(bmr, this["sport_kcal"] / 7)
         kcal_target = user.daily_kcal_target
-        # the same sanity rule as the i18n `_target_suffix`: a zero or non-finite cell is no target
+        # the same sanity rule as the i18n `_valid_target`: a zero or non-finite cell is no target
         has_kcal_target = kcal_target is not None and math.isfinite(kcal_target) and kcal_target > 0
 
         prev_food = _dated_between(food_rows, prev_start, prev_end)

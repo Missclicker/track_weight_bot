@@ -9,6 +9,7 @@ from bot.ai import FoodEstimate
 from bot.reports import (
     build_weekly_payload,
     day_food,
+    day_sport,
     previous_advice,
     split_message,
     today_summary,
@@ -585,6 +586,59 @@ async def test_day_food_survives_a_row_without_a_timestamp(repo: FakeRepo, user:
     food = await day_food(repo, user.user_id, today)
     assert food.items == [(None, "рукою", 250), ("13:00", "тест", 400)]
     assert food.total_kcal == 650
+
+
+async def test_day_sport_keeps_order_and_totals(repo: FakeRepo, user: User) -> None:
+    today = date(2026, 9, 8)
+    await repo.add_sport(user, "зал", 60, None, 250, _dt(today, 19), "text")
+    await repo.add_sport(user, "біг", 30, 5, 320, _dt(today, 7, 30), "text")
+    await repo.add_sport(user, "вчора", 90, None, 9000, _dt(date(2026, 9, 7)), "text")
+    await repo.add_sport(User(2, -100, "Інший"), "чужий", 10, None, 50, _dt(today), "text")
+    sport = await day_sport(repo, user.user_id, today)
+    # in log order, with the wall-clock time, and no distance where none was given
+    assert sport.items == [("07:30", "біг", 30, 5, 320), ("19:00", "зал", 60, None, 250)]
+    assert sport.items[0].activity == "біг" and sport.items[1].distance_km is None
+    assert (sport.total_kcal, sport.total_minutes) == (570, 90)
+    empty = await day_sport(repo, user.user_id, date(2026, 9, 9))
+    assert (empty.items, empty.total_kcal, empty.total_minutes) == ([], 0, 0)
+
+
+async def test_day_sport_reads_hand_edited_cells(repo: FakeRepo, user: User) -> None:
+    """Cells come back as strings: a decimal comma, an empty or broken cell and a missing `ts`
+    must neither crash the read nor turn into a number nobody typed."""
+    today = date(2026, 9, 8)
+    await repo.add_sport(user, "біг", 30, 5, 320, _dt(today, 7), "text")
+    base = repo.rows["sport"][0]
+    repo.rows["sport"].append(
+        {
+            **base,
+            "ts": "",
+            "activity": "плавання",
+            "minutes": "45,5",
+            "distance_km": "1,2",
+            "kcal": "410.4",
+        }
+    )
+    repo.rows["sport"].append(
+        {
+            **base,
+            "ts": f"{today.isoformat()}T20:00:00+03:00",
+            "activity": "йога",
+            "minutes": "",
+            "distance_km": "abc",
+            "kcal": "",
+        }
+    )
+    sport = await day_sport(repo, user.user_id, today)
+    assert sport.items == [
+        (None, "плавання", 45.5, 1.2, 410.4),
+        ("07:00", "біг", 30, 5, 320),
+        ("20:00", "йога", 0, None, 0),
+    ]
+    assert sport.total_kcal == pytest.approx(730.4)
+    # /today reads the same rows through the same helper
+    summary = await today_summary(repo, user, today)
+    assert summary.sport_kcal == pytest.approx(730.4) and summary.sport_minutes == 75.5
 
 
 # -- previous_advice ---------------------------------------------------------------------------
