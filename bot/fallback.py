@@ -32,10 +32,18 @@ _THINK_BLOCK = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 # Output caps, sent on every request. Groq's free tier counts the *requested* cap, not the tokens
 # actually produced, against a model's output-tokens-per-minute limit, and with no cap the server
 # reserves the model's own maximum: `qwen/qwen3.8-27b` (1000 OTPM on the free tier) refused a photo
-# estimate outright as "Request too large ... Requested 2041". The structured answers (food,
-# revise, sport) measured about 70-130 completion tokens with the reasoning included, so 600 is
-# several times the need and still well under the vision model's 1000.
-_STRUCTURED_MAX_TOKENS = 600
+# estimate outright as "Request too large ... Requested 2041". A schema call with an image goes to
+# that vision model, so it gets 600, chosen to stay under the 1000. Its hidden reasoning counts
+# toward the cap too: should photo fallbacks start failing with `json_validate_failed` or a
+# `length` cut-off, this cap is the constraint.
+_VISION_STRUCTURED_MAX_TOKENS = 600
+# A schema call without an image (a text estimate, a revision, a sport parse) goes to the text
+# model, where the reasoning counts toward the cap as well: `include_reasoning: False` only keeps
+# the thinking out of the response, it is still generated. At 600 `openai/gpt-oss-120b` spent the
+# whole budget thinking and the server refused with 400 `json_validate_failed`, "max completion
+# tokens reached before generating a valid document". The text model is not under the vision
+# model's 1000 OTPM limit, and the weekly report below already asks it for twice this cap.
+_TEXT_STRUCTURED_MAX_TOKENS = 2048
 # The weekly report is free text: a group report runs to several thousand characters of Ukrainian,
 # which is a few thousand tokens. Should a model's limit refuse this cap, the report job already
 # degrades to its numbers-only fallback, so the cap errs on the side of a complete report.
@@ -61,12 +69,17 @@ def _reasoning_params(model: str) -> dict[str, Any]:
     GPT-OSS never puts its reasoning into `content` but returns it next to the answer unless
     `include_reasoning` is off (and does not accept `reasoning_format` at all), while Qwen-style
     models inline it as a `<think>` block by default and *must* get `parsed` or `hidden` when the
-    request uses JSON mode. Any other model gets neither field - a parameter it does not know
-    could fail the whole request - and relies on `_THINK_BLOCK` instead.
+    request uses JSON mode. GPT-OSS also gets `reasoning_effort: "low"`, on every call: the
+    structured answers need no deep thinking, the weekly report is written from precomputed
+    numbers, and reasoning kept out of the response is still generated, so at the default
+    "medium" it spends the output cap and the user's wait all the same. Qwen takes other values
+    for that field on Groq and MiniMax is left at its default too, so neither gets it. Any other
+    model gets none of these fields - a parameter it does not know could fail the whole request -
+    and relies on `_THINK_BLOCK` instead.
     """
     name = model.lower()
     if "gpt-oss" in name:
-        return {"include_reasoning": False}
+        return {"include_reasoning": False, "reasoning_effort": "low"}
     if "qwen" in name or "minimax" in name:
         return {"reasoning_format": "hidden"}
     return {}
@@ -211,20 +224,26 @@ class GroqClient:
         parts = _to_parts(contents)
         # A plain string for text-only calls: every chat model accepts it, while a list of parts
         # is only guaranteed on the multimodal ones.
+        has_image = _has_image(contents)
         content: str | list[dict[str, Any]] = (
-            parts if _has_image(contents) else "\n\n".join(part["text"] for part in parts)
+            parts if has_image else "\n\n".join(part["text"] for part in parts)
         )
         messages: list[dict[str, Any]] = []
         if system_instruction is not None:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": content})
+        # Picked the way `model_for` picks the model: an image means the vision model's cap.
+        if schema is None:
+            max_tokens = _FREE_TEXT_MAX_TOKENS
+        elif has_image:
+            max_tokens = _VISION_STRUCTURED_MAX_TOKENS
+        else:
+            max_tokens = _TEXT_STRUCTURED_MAX_TOKENS
         request: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": 0.2,  # the same as the Gemini call, so both providers answer alike
-            "max_completion_tokens": (
-                _FREE_TEXT_MAX_TOKENS if schema is None else _STRUCTURED_MAX_TOKENS
-            ),
+            "max_completion_tokens": max_tokens,
             **_reasoning_params(model),
         }
         json_schema: dict[str, Any] | None = None

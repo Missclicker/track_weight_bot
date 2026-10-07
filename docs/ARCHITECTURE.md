@@ -403,15 +403,25 @@ quotes the first 300 characters of the answer, which the WARNING below shows. Ev
 carries `max_completion_tokens`, because Groq's free tier counts the *requested* cap against a
 model's output tokens per minute, and with no cap the server reserves the model's maximum: the free
 vision model's limit is 1000 OTPM, and an uncapped photo estimate was refused outright with 429
-"Request too large ... Requested 2041". Schema calls get 600 (food, revise and sport answers
-measured at about 70-130 tokens including reasoning, and the cap must stay under that 1000); the
-free-text weekly report gets 4096, since a group report runs to several thousand characters of
-Ukrainian, and if a model refuses that cap the report job already degrades to its numbers-only
-fallback. An answer whose `finish_reason` is `length` was cut off at the cap and raises, for both
-kinds of call. Reasoning models are told to keep their thinking out of `message.content`
-(`include_reasoning: false` for GPT-OSS, which rejects `reasoning_format`; `reasoning_format:
-"hidden"` for Qwen and MiniMax models, which inline a `<think>` block by default and require `parsed` or
-`hidden` in JSON mode); any other model gets neither field, and a leading `<think>...</think>` is
+"Request too large ... Requested 2041". A schema call with an image goes to that vision model and
+gets 600, chosen to stay under its 1000; Qwen's hidden reasoning counts toward it too, so a photo
+fallback failing with `json_validate_failed` or `length` would point at this cap. A schema call
+without one (text food estimate, revise, sport) goes to the text model and gets 2048: GPT-OSS's
+reasoning counts toward the cap even when it is kept out of the response, and at 600 a text call
+ran out before the answer - the server refused with 400 `json_validate_failed`, "max completion
+tokens reached before generating a valid document". The text model is not under the vision model's
+1000 OTPM limit, and the weekly report already asks it for twice as much. The free-text weekly
+report gets 4096, since a group report runs to several thousand characters of Ukrainian, and if a
+model refuses that cap the report job already degrades to its numbers-only fallback. An answer
+whose `finish_reason` is `length` was cut off at the cap and raises, for both kinds of call.
+Reasoning models are told to keep their thinking out of `message.content` (`include_reasoning:
+false` for GPT-OSS, which rejects `reasoning_format`; `reasoning_format: "hidden"` for Qwen and
+MiniMax models, which inline a `<think>` block by default and require `parsed` or `hidden` in JSON
+mode). GPT-OSS also gets `reasoning_effort: "low"` on every call, the weekly report included: the
+structured answers need no deep thinking, a report written from precomputed numbers needs little
+more, and the hidden reasoning still spends the output cap and the user's wait. Qwen takes
+different values for that field on Groq and MiniMax is left at its default as well, so neither
+carries it. Any other model gets none of these fields, and a leading `<think>...</think>` is
 stripped as a safety net. An empty answer raises. For a schema call the wrapper validates the
 answer with the schema inside the fallback attempt, so a malformed Groq answer counts as a failed
 fallback and ends in the outage reply instead of surfacing later as a generic error from

@@ -135,7 +135,16 @@ async def test_a_schema_asks_groq_for_strict_json_and_is_parsed() -> None:
             "strict": True,
         },
     }
-    assert request["max_completion_tokens"] == 600
+    # The text model's hidden reasoning counts toward the cap too: 600 ran out before the JSON.
+    assert request["max_completion_tokens"] == 2048
+
+
+async def test_a_photo_schema_call_keeps_the_vision_models_smaller_cap() -> None:
+    client, _, groq_calls = client_with_fallback([client_error(429)], [FOOD_JSON])
+    await client.estimate_food(b"\xff\xd8\xff\xe0fake", "image/jpeg", None)
+    request = groq_calls.requests[0]
+    assert request["model"] == "groq-vision"
+    assert request["max_completion_tokens"] == 600  # under the vision model's 1000 OTPM
 
 
 async def test_free_text_gets_the_larger_output_cap() -> None:
@@ -229,7 +238,7 @@ def test_every_schema_the_bot_sends_converts(schema: type[BaseModel]) -> None:
 @pytest.mark.parametrize(
     ("model", "params"),
     [
-        ("openai/gpt-oss-120b", {"include_reasoning": False}),
+        ("openai/gpt-oss-120b", {"include_reasoning": False, "reasoning_effort": "low"}),
         ("qwen/qwen3.8-27b", {"reasoning_format": "hidden"}),
         ("minimax/minimax-m2", {"reasoning_format": "hidden"}),
     ],
@@ -247,7 +256,7 @@ async def test_the_default_models_are_asked_to_keep_their_reasoning_out(
     finally:
         fallback._text_model = original
     request = groq_calls.requests[0]
-    for key in ("include_reasoning", "reasoning_format"):
+    for key in ("include_reasoning", "reasoning_format", "reasoning_effort"):
         assert request.get(key) == params.get(key)  # and never the other family's switch
 
 
@@ -256,6 +265,7 @@ async def test_an_unknown_model_gets_no_reasoning_switch() -> None:
     await client._generate(client.text_model, ["hi"], None)  # "groq-text"
     assert "include_reasoning" not in groq_calls.requests[0]
     assert "reasoning_format" not in groq_calls.requests[0]
+    assert "reasoning_effort" not in groq_calls.requests[0]
 
 
 async def test_a_leading_think_block_is_stripped() -> None:
